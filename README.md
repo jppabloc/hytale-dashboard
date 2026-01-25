@@ -47,6 +47,34 @@ Web-Dashboard zur Verwaltung eines Hytale Dedicated Servers unter Linux (Debian/
 
 ---
 
+## Schnellinstallation (Empfohlen)
+
+Das Installations-Script richtet alles automatisch ein:
+
+```bash
+# Repository klonen
+git clone https://github.com/zonfacter/hytale-dashboard.git /tmp/hytale-dashboard
+
+# Installation starten
+sudo /tmp/hytale-dashboard/install.sh
+```
+
+Das Script:
+- Installiert alle Abhaengigkeiten (Python, Java, etc.)
+- Erstellt Benutzer und Verzeichnisse
+- Konfiguriert Systemd Services
+- Richtet Firewall-Regeln ein
+- Fragt nach Passwort und optionalem CurseForge API Key
+- Zeigt am Ende alle naechsten Schritte an
+
+Nach der Installation muss nur noch der Hytale Server heruntergeladen werden (OAuth-Authentifizierung erforderlich).
+
+---
+
+## Manuelle Installation
+
+Falls du die Installation manuell durchfuehren moechtest:
+
 ## Hytale Server Installation
 
 ### 1. System-User anlegen
