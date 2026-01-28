@@ -43,6 +43,8 @@ Web-Dashboard zur Verwaltung eines Hytale Dedicated Servers unter Linux (Debian/
 
 - Debian 12+ / Ubuntu 22.04+
 - Python 3.11+
+- Java 25 (Adoptium/Temurin empfohlen; x64/arm64 unterstuetzt)
+- Mindestens 4 GB RAM (mehr je nach Spieleranzahl/View Distance)
 - systemd
 - Hytale Dedicated Server Binary (von Hypixel)
 
@@ -78,6 +80,22 @@ Falls du die Installation manuell durchfuehren moechtest:
 
 ## Hytale Server Installation
 
+### Java 25 installieren (Adoptium empfohlen)
+
+Hytale benoetigt Java 25. Installation und Verifizierung:
+
+```bash
+java --version
+```
+
+Erwartete Ausgabe (Beispiel):
+
+```
+openjdk 25.0.1 2025-10-21 LTS
+OpenJDK Runtime Environment Temurin-25.0.1+8 (build 25.0.1+8-LTS)
+OpenJDK 64-Bit Server VM Temurin-25.0.1+8 (build 25.0.1+8-LTS, mixed mode, sharing)
+```
+
 ### 1. System-User anlegen
 
 ```bash
@@ -85,6 +103,8 @@ sudo useradd -r -m -d /opt/hytale-server -s /bin/bash hytale
 ```
 
 ### 2. Server-Dateien herunterladen
+
+Es gibt zwei Optionen: **Downloader CLI (empfohlen)** oder **manuelles Kopieren aus dem Launcher**.
 
 Den Hytale Downloader von der offiziellen Quelle beziehen und unter `/opt/hytale-server/.downloader/` ablegen:
 
@@ -103,6 +123,23 @@ cd /opt/hytale-server
 ```
 
 Beim ersten Start oeffnet sich ein OAuth-Flow im Browser. Nach der Authentifizierung werden die Credentials gespeichert.
+
+Nuetzliche CLI-Optionen:
+- `-print-version` (Version ohne Download)
+- `-version` (Downloader-Version)
+- `-check-update` (Downloader-Updates pruefen)
+- `-patchline pre-release` (Pre-Release Kanal)
+- `-download-path game.zip` (Ziel-Datei)
+- `-skip-update-check` (Update-Check ueberspringen)
+
+#### Manuell aus dem Launcher kopieren (schnell zum Testen)
+
+Pfad der Launcher-Installation:
+- **Windows**: `%appdata%\\Hytale\\install\\release\\package\\game\\latest`
+- **Linux**: `$XDG_DATA_HOME/Hytale/install/release/package/game/latest`
+- **macOS**: `~/Application Support/Hytale/install/release/package/game/latest`
+
+Kopiere `Server/` und `Assets.zip` in dein Server-Verzeichnis.
 
 ### 3. Server entpacken
 
@@ -165,10 +202,13 @@ ExecStart=/opt/hytale-server/start.sh -Xms2G -Xmx4G -jar Server/HytaleServer.jar
 
 Wichtige Flags:
 - `-Xms2G -Xmx4G`: Java Heap (min/max)
+- `-XX:AOTCache=HytaleServer.aot`: AOT-Cache (optional, kann Startup verbessern)
 - `--bind 0.0.0.0:5520`: IP und Port
 - `--backup`: Automatische Backups aktivieren
 - `--backup-frequency 60`: Backup-Intervall in Minuten
 - `--backup-dir backups`: Backup-Verzeichnis
+
+Hinweis: Zu wenig RAM fuehrt oft zu erhöhter CPU-Last durch Garbage Collection. Teste verschiedene `-Xmx` Werte.
 
 ### 7. Server-Konfiguration (`config.json`)
 
@@ -218,6 +258,14 @@ Der Hytale-Server speichert Authentifizierungs-Credentials verschluesselt in der
 - Die Credentials werden dann verschluesselt gespeichert und automatisch erneuert
 - **Niemals `auth.enc` manuell bearbeiten oder loeschen** (sonst ist Re-Authentifizierung noetig)
 - Die Datei hat restriktive Berechtigungen (`600`) und gehoert dem `hytale`-User
+
+Authentifizierung (Device Flow):
+
+```
+/auth login device
+```
+
+Folge den Anweisungen (accounts.hytale.com/device) und gib den Code ein. Hinweis: Pro Lizenz sind bis zu 100 Server erlaubt.
 
 Das Update-Script (`hytale-update.sh`) bewahrt `auth.enc` bei Updates automatisch.
 
@@ -616,6 +664,12 @@ ls -la /opt/hytale-server/.console_pipe
 ```
 
 ---
+
+## Interessante Quellen
+
+- Hytale Server Manual: https://support.hytale.com/hc/en-us/articles/45326769420827-Hytale-Server-Manual
+- Keeping your Hytale server up to date: https://hytale.game/en/keeping-your-hytale-server-up-to-date/
+- Hytale Modding Documentation: https://britakee-studios.gitbook.io/hytale-modding-documentation
 
 ## Security
 
