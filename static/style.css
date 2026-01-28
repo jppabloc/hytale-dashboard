@@ -158,6 +158,9 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-control { border-color: var(--accent); }
 .btn-danger { border-color: var(--red); color: var(--red); }
 .btn-warn { border-color: var(--yellow); color: var(--yellow); }
+.btn-toggle-op {
+  border-color: var(--accent);
+}
 
 .toggle-label {
   font-size: 12px;

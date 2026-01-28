@@ -18,12 +18,13 @@ Web-Dashboard zur Verwaltung eines Hytale Dedicated Servers unter Linux (Debian/
 - **Service-Status**: ActiveState, SubState, MainPID, Uptime
 - **Disk-Auslastung**: Belegung der Server-Partition mit visueller Anzeige
 - **Version**: Aktuelle und verfuegbare Server-Version, manuelles/automatisches Update
+- **Auto-Update-Check**: Stuendliche Versionspruefung mit geplantem Update bei Spielern
 - **Backup-Uebersicht**: Liste der vorhandenen Backups mit Groesse und Datum
 - **Logs**: Live-Tail der letzten 150 Zeilen (Auto-Polling)
 - **Server-Steuerung**: Start/Stop/Restart Buttons, Backup ausloesen
 
 ### Verwaltung (Zweite Seite `/manage`)
-- **Spieler-Liste**: Online/Offline-Status, Letzter Login, aktuelle Welt
+- **Spieler-Liste**: Online/Offline-Status, Letzter Login, aktuelle Welt, OP-Status
 - **Server-Konsole**: Befehle direkt an den Server senden (via FIFO Pipe)
 - **Konfiguration**: Server Config und World Config live editieren (JSON)
 - **Backup-Verwaltung**: Backups anzeigen, loeschen
@@ -344,6 +345,9 @@ Alle Einstellungen erfolgen ueber Environment-Variablen in der systemd Unit-Date
 | `DASH_PASS` | `change-me` | Basic Auth Passwort |
 | `ALLOW_CONTROL` | `true` | Steuerfunktionen aktivieren |
 | `CF_API_KEY` | *(leer)* | CurseForge API Key (fuer Mod-Browser) |
+| `UPDATE_CHECK_INTERVAL` | `3600` | Sekunden zwischen automatischen Versionschecks |
+| `UPDATE_NOTICE_MINUTES` | `15` | Minuten Vorlauf fuer geplante Updates bei Spielern |
+| `UPDATE_POSTPONE_COMMAND` | `/postponeupdate` | Chat-Befehl zum Verschieben des Updates |
 
 ---
 
@@ -538,9 +542,9 @@ Verfuegbare Befehle (Auswahl):
 |--------|-------------|
 | `help` | Befehlsliste anzeigen |
 | `save` | Welt speichern |
-| `stop` | Server stoppen |
+| `stop` | Server stoppen (empfohlen ueber Dashboard-Buttons) |
 | `time set <value>` | Tageszeit setzen |
-| `whitelist add <name>` | Spieler zur Whitelist hinzufuegen |
+| `whitelist add <name>` | Spieler zur Whitelist hinzufuegen (empfohlen ueber separate Tools) |
 | `say <message>` | Nachricht an alle Spieler |
 | `gamemode <mode> <player>` | Spielmodus aendern |
 | `tp <player> <x> <y> <z>` | Spieler teleportieren |
@@ -578,6 +582,10 @@ Ablauf:
 ### Auto-Update
 
 Kann im Dashboard aktiviert werden. Fuehrt das Update automatisch nach dem naechsten Backup durch.
+
+### Geplante Updates (Spieler online)
+
+Der Dashboard-Service prueft stündlich auf neue Versionen. Wenn ein Update verfuegbar ist und Spieler online sind, wird per Chat eine Ankuendigung gesendet und das Update nach 15 Minuten ausgefuehrt. Spieler koennen mit `/postponeupdate` das Update jeweils um weitere 15 Minuten verschieben.
 
 ---
 

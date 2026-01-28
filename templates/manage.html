@@ -6,7 +6,7 @@
   <title>Hytale Dashboard - Verwaltung</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
-<body>
+  <body data-allow-control="{{ 'true' if allow_control else 'false' }}">
   <header>
     <div class="header-top">
       <h1>Hytale Server Dashboard</h1>
@@ -21,14 +21,14 @@
   <main>
     <!-- Players -->
     <section class="card card-wide">
-      <h2>Spieler</h2>
+      <h2>Spieler &amp; Rechte</h2>
       <div class="table-wrap">
         <table class="table">
           <thead>
-            <tr><th>Name</th><th>Status</th><th>Letzter Login</th><th>Welt</th></tr>
+            <tr><th>Name</th><th>Status</th><th>Letzter Login</th><th>Welt</th><th>Rolle</th>{% if allow_control %}<th>Aktion</th>{% endif %}</tr>
           </thead>
           <tbody id="playerTable">
-            <tr><td colspan="4" class="muted">Lade...</td></tr>
+            <tr><td colspan="{{ 6 if allow_control else 5 }}" class="muted">Lade...</td></tr>
           </tbody>
         </table>
       </div>
@@ -45,8 +45,9 @@
       <details class="command-ref">
         <summary class="muted">Befehlsreferenz</summary>
         <div class="command-list">
-          <code>help</code> <code>save</code> <code>stop</code> <code>time</code>
-          <code>whitelist</code> <code>say</code> <code>gamemode</code> <code>tp</code> <code>kick</code>
+          <code>help</code> <code>save</code> <code>time</code>
+          <code>say</code> <code>gamemode</code> <code>tp</code> <code>kick</code>
+          <code>stop</code> <code>whitelist</code>
         </div>
       </details>
     </section>

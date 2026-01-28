@@ -27,14 +27,29 @@
     }
   }
 
+  function normalizeCommand(command) {
+    return command.trim().toLowerCase();
+  }
+
+  function isCommandAllowed(command) {
+    const normalized = normalizeCommand(command);
+    if (!normalized) return false;
+    const [head] = normalized.split(/\s+/);
+    const blocked = new Set(["op", "deop", "stop", "restart", "update", "whitelist", "ban", "unban"]);
+    return !blocked.has(head);
+  }
+
   // --- Players ---
   async function refreshPlayers() {
     const data = await api("/api/players");
     if (!data) return;
     const tbody = el("playerTable");
     const players = data.players || [];
+    const ops = new Set((data.ops || []).map(p => String(p).toLowerCase()));
+    const allowControl = document.body.dataset.allowControl === "true";
     if (players.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="4" class="muted">Keine Spieler gefunden</td></tr>';
+      const colspan = allowControl ? 6 : 5;
+      tbody.innerHTML = `<tr><td colspan="${colspan}" class="muted">Keine Spieler gefunden</td></tr>`;
       return;
     }
     tbody.innerHTML = players.map(p => {
@@ -42,13 +57,38 @@
         ? '<span class="badge badge-active">Online</span>'
         : '<span class="badge badge-inactive">Offline</span>';
       const login = p.last_login ? p.last_login.replace("T", " ").substring(0, 19) : "-";
+      const isOp = ops.has(String(p.name).toLowerCase());
+      const role = isOp ? '<span class="badge badge-update">OP</span>' : '<span class="badge badge-muted">Spieler</span>';
+      const action = allowControl
+        ? `<button class="btn-toggle-op" data-name="${p.name}" data-op="${isOp}">${isOp ? "OP entfernen" : "OP geben"}</button>`
+        : "";
       return `<tr>
         <td><strong>${p.name}</strong></td>
         <td>${badge}</td>
         <td>${login}</td>
         <td>${p.world || "-"}</td>
+        <td>${role}</td>
+        ${allowControl ? `<td>${action}</td>` : ""}
       </tr>`;
     }).join("");
+    if (allowControl) {
+      tbody.querySelectorAll(".btn-toggle-op").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          const name = btn.dataset.name;
+          const enable = btn.dataset.op !== "true";
+          const result = await api("/api/players/op", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, enable }),
+          });
+          if (result && result.ok) {
+            toast(enable ? `OP vergeben: ${name}` : `OP entfernt: ${name}`);
+          }
+          await refreshPlayers();
+        });
+      });
+    }
   }
 
   // --- Console ---
@@ -72,6 +112,10 @@
     async function sendCommand() {
       const cmd = input.value.trim();
       if (!cmd) return;
+      if (!isCommandAllowed(cmd)) {
+        toast("Befehl in der Konsole gesperrt. Nutze die User-Verwaltung oder Dashboard-Funktionen.", "error");
+        return;
+      }
       input.value = "";
       sendBtn.disabled = true;
       const result = await api("/api/console/send", {

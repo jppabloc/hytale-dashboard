@@ -6,8 +6,10 @@ import secrets
 import asyncio
 import subprocess
 import shutil
+import contextlib
+import re
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI, Request, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -32,6 +34,20 @@ UPDATE_SCRIPT = "/usr/local/sbin/hytale-update.sh"
 VERSION_FILE = SERVER_DIR / "last_version.txt"
 LATEST_VERSION_FILE = SERVER_DIR / ".latest_version"
 UPDATE_AFTER_BACKUP_FLAG = SERVER_DIR / ".update_after_backup"
+UPDATE_CHECK_INTERVAL = int(os.environ.get("UPDATE_CHECK_INTERVAL", "3600"))
+UPDATE_NOTICE_MINUTES = int(os.environ.get("UPDATE_NOTICE_MINUTES", "15"))
+UPDATE_POSTPONE_COMMAND = os.environ.get("UPDATE_POSTPONE_COMMAND", "/postponeupdate")
+UPDATE_CHECK_FILE = SERVER_DIR / ".last_version_check"
+UPDATE_SCHEDULE_FILE = SERVER_DIR / ".update_schedule"
+UPDATE_COMMAND_CURSOR_FILE = SERVER_DIR / ".update_command_cursor"
+UPDATE_CHECK_LOCK = SERVER_DIR / ".update_check_lock"
+UPDATE_NOTICE_PREFIX = "[Dashboard]"
+CONSOLE_PIPE = SERVER_DIR / ".console_pipe"
+MODS_DIR = SERVER_DIR / "mods"
+WORLD_CONFIG_FILE = SERVER_DIR / "universe" / "worlds" / "default" / "config.json"
+SERVER_CONFIG_FILE = SERVER_DIR / "config.json"
+PLAYER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
+BLOCKED_CONSOLE_COMMANDS = {"op", "deop", "update", "restart", "ban", "unban"}
 
 # ---------------------------------------------------------------------------
 # App Setup
@@ -213,6 +229,263 @@ def check_auto_update() -> None:
         # Flag is removed by the update script
 
 
+def read_timestamp(path: Path) -> datetime | None:
+    try:
+        if not path.exists():
+            return None
+        value = path.read_text().strip()
+        if not value:
+            return None
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except ValueError:
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                return None
+    except (ValueError, OSError):
+        return None
+
+
+def write_timestamp(path: Path, value: datetime) -> None:
+    try:
+        path.write_text(str(int(value.timestamp())))
+    except OSError:
+        pass
+
+
+def parse_players(output: str) -> list[dict]:
+    players = {}
+    join_re = re.compile(
+        r"(\S+T\S+).*Adding player '([^']+)' to world '([^']+)' at location .+\(([a-f0-9-]+)\)"
+    )
+    leave_re = re.compile(
+        r"(\S+T\S+).*Removing player '([^']+?)(?:\s*\([^)]+\))?'.*\(([a-f0-9-]+)\)\s*$"
+    )
+    for line in output.splitlines():
+        m = join_re.search(line)
+        if m:
+            ts, name, world, uuid = m.group(1), m.group(2), m.group(3), m.group(4)
+            players[uuid] = {
+                "name": name, "uuid": uuid,
+                "online": True, "last_login": ts,
+                "last_logout": None, "world": world, "position": None,
+            }
+            continue
+        m = leave_re.search(line)
+        if m:
+            ts, name, uuid = m.group(1), m.group(2), m.group(3)
+            if uuid in players:
+                players[uuid]["online"] = False
+                players[uuid]["last_logout"] = ts
+    return list(players.values())
+
+
+def get_player_entries() -> tuple[list[dict], str | None]:
+    output, rc = run_cmd(
+        ["journalctl", "-u", "hytale", "--no-pager", "-o", "short-iso"],
+        timeout=15
+    )
+    if rc != 0:
+        return [], output
+    return parse_players(output), None
+
+
+def get_online_players() -> list[str] | None:
+    players, error = get_player_entries()
+    if error:
+        return None
+    return [p["name"] for p in players if p.get("online")]
+
+
+def send_console_command(command: str, ignore_errors: bool = False) -> None:
+    if not CONSOLE_PIPE.exists():
+        if ignore_errors:
+            return
+        raise RuntimeError("Konsolen-Pipe nicht gefunden. Server laeuft nicht mit Wrapper.")
+    try:
+        fd = os.open(str(CONSOLE_PIPE), os.O_WRONLY | os.O_NONBLOCK)
+        os.write(fd, (command + "\n").encode())
+        os.close(fd)
+    except OSError as exc:
+        if ignore_errors:
+            return
+        raise RuntimeError(f"Fehler beim Senden: {exc}") from exc
+
+
+def send_update_notice() -> None:
+    msg = (
+        f"{UPDATE_NOTICE_PREFIX} Update startet in {UPDATE_NOTICE_MINUTES} Minuten. "
+        f"Nutze {UPDATE_POSTPONE_COMMAND} um {UPDATE_NOTICE_MINUTES} Minuten zu verschieben."
+    )
+    send_console_command(f"say {msg}", ignore_errors=True)
+
+
+def load_update_schedule() -> datetime | None:
+    return read_timestamp(UPDATE_SCHEDULE_FILE)
+
+
+def save_update_schedule(scheduled_at: datetime) -> None:
+    write_timestamp(UPDATE_SCHEDULE_FILE, scheduled_at)
+
+
+def clear_update_schedule() -> None:
+    with contextlib.suppress(OSError):
+        UPDATE_SCHEDULE_FILE.unlink()
+
+
+def should_run_version_check(now: datetime) -> bool:
+    if UPDATE_CHECK_INTERVAL <= 0:
+        return False
+    lock_time = read_timestamp(UPDATE_CHECK_LOCK)
+    if lock_time and now - lock_time < timedelta(seconds=30):
+        return False
+    last_check = read_timestamp(UPDATE_CHECK_FILE)
+    if not last_check:
+        return True
+    return now - last_check >= timedelta(seconds=UPDATE_CHECK_INTERVAL)
+
+
+def check_for_updates() -> dict | None:
+    output, rc = run_cmd(["sudo", UPDATE_SCRIPT, "check"], timeout=300)
+    if rc != 0:
+        return None
+    try:
+        return json.loads(output)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def has_update_available() -> bool:
+    info = get_version_info()
+    if info.get("update_available"):
+        return True
+    return False
+
+
+def apply_postpone_if_requested() -> bool:
+    if not UPDATE_COMMAND_CURSOR_FILE.exists():
+        last_cursor = datetime.min.replace(tzinfo=timezone.utc)
+    else:
+        last_cursor = read_timestamp(UPDATE_COMMAND_CURSOR_FILE) or datetime.min.replace(tzinfo=timezone.utc)
+    since_arg = f"@{int(last_cursor.timestamp())}"
+    output, rc = run_cmd(
+        ["journalctl", "-u", "hytale", "--no-pager", "-o", "short-iso", f"--since={since_arg}"],
+        timeout=10
+    )
+    if rc != 0:
+        return False
+    postpone_used = apply_postpone_chat_commands(output)
+    write_timestamp(UPDATE_COMMAND_CURSOR_FILE, datetime.now(timezone.utc))
+    return postpone_used
+
+
+def schedule_or_run_update() -> None:
+    if not ALLOW_CONTROL:
+        return
+    now = datetime.now(timezone.utc)
+    schedule = load_update_schedule()
+    if schedule:
+        apply_postpone_if_requested()
+        schedule = load_update_schedule()
+        if schedule and now >= schedule:
+            run_cmd(["sudo", UPDATE_SCRIPT, "update"], timeout=600)
+            clear_update_schedule()
+        return
+    if not has_update_available():
+        return
+    online_players = get_online_players()
+    if online_players is None:
+        return
+    if not online_players:
+        run_cmd(["sudo", UPDATE_SCRIPT, "update"], timeout=600)
+        return
+    scheduled_at = now + timedelta(minutes=UPDATE_NOTICE_MINUTES)
+    if load_update_schedule():
+        return
+    save_update_schedule(scheduled_at)
+    send_update_notice()
+
+
+def check_hourly_updates() -> None:
+    if not ALLOW_CONTROL:
+        return
+    now = datetime.now(timezone.utc)
+    if not should_run_version_check(now):
+        schedule_or_run_update()
+        return
+    write_timestamp(UPDATE_CHECK_LOCK, now)
+    result = check_for_updates()
+    write_timestamp(UPDATE_CHECK_FILE, now)
+    with contextlib.suppress(OSError):
+        UPDATE_CHECK_LOCK.unlink()
+    if result and result.get("update_available"):
+        schedule_or_run_update()
+
+
+def should_allow_console_command(command: str) -> bool:
+    parts = command.strip().split()
+    if not parts:
+        return False
+    head = parts[0].lower()
+    if head in BLOCKED_CONSOLE_COMMANDS:
+        return False
+    if head == "stop":
+        return False
+    if head == "whitelist":
+        return False
+    return True
+
+
+def get_ops_list() -> list[str]:
+    ops_file = SERVER_DIR / "ops.json"
+    if not ops_file.exists():
+        return []
+    try:
+        data = json.loads(ops_file.read_text())
+        if isinstance(data, list):
+            return [str(entry) for entry in data]
+    except (json.JSONDecodeError, OSError):
+        return []
+    return []
+
+
+def set_operator(name: str, enable: bool) -> None:
+    if not PLAYER_NAME_RE.match(name):
+        raise RuntimeError("Ungueltiger Spielername.")
+    command = f"{'op' if enable else 'deop'} {name}"
+    send_console_command(command)
+
+
+def parse_chat_commands(output: str) -> list[dict]:
+    entries = []
+    chat_re = re.compile(r"(\S+T\S+).*<([^>]+)> (.+)")
+    for line in output.splitlines():
+        match = chat_re.search(line)
+        if not match:
+            continue
+        ts, player, message = match.group(1), match.group(2), match.group(3).strip()
+        entries.append({"time": ts, "player": player, "message": message})
+    return entries
+
+
+def apply_postpone_chat_commands(output: str) -> bool:
+    scheduled = load_update_schedule()
+    if not scheduled:
+        return False
+    entries = parse_chat_commands(output)
+    for entry in entries:
+        if entry["message"].startswith(UPDATE_POSTPONE_COMMAND):
+            new_schedule = scheduled + timedelta(minutes=UPDATE_NOTICE_MINUTES)
+            save_update_schedule(new_schedule)
+            send_console_command(
+                f"say {UPDATE_NOTICE_PREFIX} Update verschoben bis {new_schedule.strftime('%H:%M UTC')}.",
+                ignore_errors=True
+            )
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -241,6 +514,7 @@ async def manage(request: Request, user: str = Depends(verify_credentials)):
 @app.get("/api/status")
 async def api_status(user: str = Depends(verify_credentials)):
     check_auto_update()
+    check_hourly_updates()
     return JSONResponse({
         "service": get_service_status(),
         "backups": get_backups(),
@@ -488,50 +762,29 @@ async def api_update_auto(user: str = Depends(verify_credentials)):
 # ---------------------------------------------------------------------------
 # Management Endpoints
 # ---------------------------------------------------------------------------
-import re
-
-CONSOLE_PIPE = SERVER_DIR / ".console_pipe"
-MODS_DIR = SERVER_DIR / "mods"
-WORLD_CONFIG_FILE = SERVER_DIR / "universe" / "worlds" / "default" / "config.json"
-SERVER_CONFIG_FILE = SERVER_DIR / "config.json"
-
-
 @app.get("/api/players")
 async def api_players(user: str = Depends(verify_credentials)):
     """Parse journalctl for player join/leave events."""
-    output, rc = run_cmd(
-        ["journalctl", "-u", "hytale", "--no-pager", "-o", "short-iso"],
-        timeout=15
-    )
-    if rc != 0:
-        return JSONResponse({"players": [], "error": output})
+    players, error = get_player_entries()
+    if error:
+        return JSONResponse({"players": [], "error": error})
+    return JSONResponse({"players": players, "ops": get_ops_list()})
 
-    players = {}
-    join_re = re.compile(
-        r"(\S+T\S+).*Adding player '([^']+)' to world '([^']+)' at location .+\(([a-f0-9-]+)\)"
-    )
-    leave_re = re.compile(
-        r"(\S+T\S+).*Removing player '([^']+?)(?:\s*\([^)]+\))?'.*\(([a-f0-9-]+)\)\s*$"
-    )
 
-    for line in output.splitlines():
-        m = join_re.search(line)
-        if m:
-            ts, name, world, uuid = m.group(1), m.group(2), m.group(3), m.group(4)
-            players[uuid] = {
-                "name": name, "uuid": uuid,
-                "online": True, "last_login": ts,
-                "last_logout": None, "world": world, "position": None,
-            }
-            continue
-        m = leave_re.search(line)
-        if m:
-            ts, name, uuid = m.group(1), m.group(2), m.group(3)
-            if uuid in players:
-                players[uuid]["online"] = False
-                players[uuid]["last_logout"] = ts
-
-    return JSONResponse({"players": list(players.values())})
+@app.post("/api/players/op")
+async def api_player_op(request: Request, user: str = Depends(verify_credentials)):
+    if not ALLOW_CONTROL:
+        raise HTTPException(status_code=403, detail="Control-Aktionen deaktiviert.")
+    body = await request.json()
+    name = body.get("name", "").strip()
+    enable = bool(body.get("enable", True))
+    if not name:
+        raise HTTPException(status_code=400, detail="Kein Spieler angegeben.")
+    try:
+        set_operator(name, enable)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"ok": True, "name": name, "enabled": enable}
 
 
 @app.post("/api/console/send")
@@ -543,16 +796,16 @@ async def api_console_send(request: Request, user: str = Depends(verify_credenti
     command = body.get("command", "").strip()
     if not command:
         raise HTTPException(status_code=400, detail="Kein Befehl angegeben.")
+    if not should_allow_console_command(command):
+        raise HTTPException(status_code=400, detail="Befehl ist gesperrt. Nutze die User-Verwaltung oder Dashboard-Funktionen.")
 
     if not CONSOLE_PIPE.exists():
         raise HTTPException(status_code=500, detail="Konsolen-Pipe nicht gefunden. Server laeuft nicht mit Wrapper.")
 
     try:
-        fd = os.open(str(CONSOLE_PIPE), os.O_WRONLY | os.O_NONBLOCK)
-        os.write(fd, (command + "\n").encode())
-        os.close(fd)
-    except OSError as e:
-        raise HTTPException(status_code=500, detail=f"Fehler beim Senden: {e}")
+        send_console_command(command)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
     return {"ok": True, "command": command}
 
