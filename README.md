@@ -674,7 +674,7 @@ Das Dashboard implementiert mehrschichtige Sicherheitsmassnahmen zum Schutz des 
 **Defense-in-Depth:**
 - Mehrschichtige Validierung (API-Ebene + FIFO-Ebene)
 - Befehle werden nur als Text ueber FIFO Pipe gesendet (keine Shell-Ausfuehrung)
-- Umfassende Test-Suite mit 100+ Sicherheitstests
+- Umfassende Test-Suite mit 85+ Sicherheitstests
 
 Diese Massnahmen verhindern, dass ueber die Webkonsole schaedliche Befehle ausgefuehrt werden koennen, die das Host-System beschaedigen koennten.
 

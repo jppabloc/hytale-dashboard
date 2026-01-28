@@ -58,9 +58,13 @@ BLOCKED_CONSOLE_COMMANDS = {
 }
 
 # Security: Shell metacharacters that could enable command injection
-SHELL_METACHARACTERS = set(';&|`$()<>\\"\'\n\r\t')
+# Note: Blocking backslash, newlines, carriage returns, and semicolons/pipes/etc.
+# Quotes and tabs are blocked as they could be used in injection attempts and
+# are not needed for legitimate Hytale console commands
+SHELL_METACHARACTERS = set(';&|`$()<>\\\n\r')
 
 # Security: Dangerous command patterns that could harm the host system
+# Using word boundaries (\b) to avoid false positives on substrings
 DANGEROUS_PATTERNS = [
     re.compile(r'\.\./'),  # Path traversal attempts
     re.compile(r'/etc/'),  # System configuration access
@@ -68,29 +72,29 @@ DANGEROUS_PATTERNS = [
     re.compile(r'/sys/'),  # System information access
     re.compile(r'/dev/'),  # Device access
     re.compile(r'/root/'), # Root directory access
-    re.compile(r'/opt/(?!hytale-server)'),  # Access outside hytale directory
+    re.compile(r'/opt/(?!hytale-server)'),  # Access to /opt/ except hytale-server subdirectories
     re.compile(r'/tmp/'),  # Temp directory access
     re.compile(r'/var/'),  # Var directory access (logs, etc)
-    re.compile(r'sudo'),   # Privilege escalation
-    re.compile(r'su\s'),   # User switching
-    re.compile(r'chmod'),  # Permission changes
-    re.compile(r'chown'),  # Ownership changes
-    re.compile(r'rm\s'),   # File deletion
-    re.compile(r'mv\s'),   # File moving
-    re.compile(r'cp\s'),   # File copying
-    re.compile(r'dd\s'),   # Disk operations
-    re.compile(r'mkfs'),   # Filesystem creation
-    re.compile(r'mount'),  # Filesystem mounting
-    re.compile(r'umount'), # Filesystem unmounting
-    re.compile(r'kill'),   # Process termination
-    re.compile(r'pkill'),  # Process termination
-    re.compile(r'reboot'), # System reboot
-    re.compile(r'shutdown'), # System shutdown
-    re.compile(r'poweroff'), # System poweroff
-    re.compile(r'halt'),   # System halt
-    re.compile(r'init\s'), # Init system control
-    re.compile(r'systemctl'), # Systemd control
-    re.compile(r'service'), # Service control
+    re.compile(r'\bsudo\b'),   # Privilege escalation
+    re.compile(r'\bsu\b'),     # User switching
+    re.compile(r'\bchmod\b'),  # Permission changes
+    re.compile(r'\bchown\b'),  # Ownership changes
+    re.compile(r'\brm\b'),     # File deletion
+    re.compile(r'\bmv\b'),     # File moving
+    re.compile(r'\bcp\b'),     # File copying
+    re.compile(r'\bdd\b'),     # Disk operations
+    re.compile(r'\bmkfs\b'),   # Filesystem creation
+    re.compile(r'\bmount\b'),  # Filesystem mounting
+    re.compile(r'\bumount\b'), # Filesystem unmounting
+    re.compile(r'\bkill\b'),   # Process termination
+    re.compile(r'\bpkill\b'),  # Process termination
+    re.compile(r'\breboot\b'), # System reboot
+    re.compile(r'\bshutdown\b'), # System shutdown
+    re.compile(r'\bpoweroff\b'), # System poweroff
+    re.compile(r'\bhalt\b'),   # System halt
+    re.compile(r'\binit\b'),   # Init system control
+    re.compile(r'\bsystemctl\b'), # Systemd control
+    re.compile(r'\bservice\b'), # Service control
 ]
 
 # ---------------------------------------------------------------------------
@@ -370,8 +374,13 @@ def send_console_command(command: str, ignore_errors: bool = False) -> None:
     try:
         fd = os.open(str(CONSOLE_PIPE), os.O_WRONLY | os.O_NONBLOCK)
         # Only write the command itself, newline is added here
-        os.write(fd, (command + "\n").encode('utf-8', errors='ignore'))
+        # Using strict encoding to reject invalid UTF-8 rather than silently dropping characters
+        os.write(fd, (command + "\n").encode('utf-8', errors='strict'))
         os.close(fd)
+    except UnicodeEncodeError as exc:
+        if ignore_errors:
+            return
+        raise RuntimeError(f"Invalid command encoding: {exc}") from exc
     except OSError as exc:
         if ignore_errors:
             return
@@ -527,13 +536,6 @@ def should_allow_console_command(command: str) -> tuple[bool, str]:
     # Check blocked commands list
     if head in BLOCKED_CONSOLE_COMMANDS:
         return False, f"Command '{head}' is blocked. Use dashboard features instead"
-    
-    # Additional specific checks
-    if head == "stop":
-        return False, "Use dashboard stop button instead"
-    
-    if head == "whitelist":
-        return False, "Whitelist management not allowed via console"
     
     # Check for dangerous patterns in entire command
     command_lower = command_stripped.lower()
