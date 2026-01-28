@@ -536,21 +536,43 @@ Die Konsole funktioniert ueber eine FIFO Named Pipe:
 3. Java liest stdin von der Pipe
 4. Das Dashboard schreibt Befehle in die Pipe
 
-Verfuegbare Befehle (Auswahl):
+### Sicherheit
+
+Das Dashboard implementiert umfassende Sicherheitsmassnahmen, um das Host-System vor schaedlichen Befehlen zu schuetzen:
+
+**Blockierte Befehle:**
+- Systemsteuerung: `stop`, `restart`, `reload`, `shutdown`, `reboot`, `poweroff`, `halt`
+- Benutzerverwaltung: `op`, `deop`, `ban`, `unban`, `whitelist`
+- Plugin-Management: `plugins`, `plugin`, `execute`, `eval`
+
+**Verbotene Zeichen und Muster:**
+- Shell-Metazeichen: `;`, `&`, `|`, `` ` ``, `$`, `()`, `<>`, `\`, Anfuehrungszeichen, Newlines, Tabs
+- Path-Traversal: `../`
+- System-Pfade: `/etc/`, `/proc/`, `/sys/`, `/dev/`, `/root/`, `/tmp/`, `/var/`, `/opt/` (ausser hytale-server)
+- Gefaehrliche Befehle: `sudo`, `su`, `chmod`, `chown`, `rm`, `mv`, `cp`, `dd`, `mkfs`, `mount`, `kill`, `systemctl`, `service`
+
+**Zusaetzliche Schutzmasnahmen:**
+- Maximale Befehlslaenge: 500 Zeichen
+- Null-Byte-Schutz
+- Defense-in-Depth mit mehrschichtiger Validierung
+
+Diese Massnahmen verhindern Command-Injection, Path-Traversal-Angriffe und den Zugriff auf Systemressourcen ausserhalb des Hytale-Servers.
+
+### Verfuegbare Befehle (Auswahl)
 
 | Befehl | Beschreibung |
 |--------|-------------|
 | `help` | Befehlsliste anzeigen |
 | `save` | Welt speichern |
-| `stop` | Server stoppen (empfohlen ueber Dashboard-Buttons) |
 | `time set <value>` | Tageszeit setzen |
-| `whitelist add <name>` | Spieler zur Whitelist hinzufuegen (empfohlen ueber separate Tools) |
 | `say <message>` | Nachricht an alle Spieler |
 | `gamemode <mode> <player>` | Spielmodus aendern |
 | `tp <player> <x> <y> <z>` | Spieler teleportieren |
 | `kick <player>` | Spieler kicken |
+| `give <player> <item> <amount>` | Items geben |
+| `weather <clear|rain>` | Wetter aendern |
 
-Hinweis: Befehlsausgaben (z.B. von `help`) werden auf der Server-Konsole angezeigt, nicht im Journal. Aktions-Befehle (save, stop, kick) erzeugen sichtbare Log-Eintraege.
+Hinweis: Blockierte Befehle (`stop`, `op`, `whitelist`, etc.) muessen ueber die entsprechenden Dashboard-Funktionen ausgefuehrt werden, um ordnungsgemaesse Validierung und Protokollierung zu gewaehrleisten.
 
 ---
 
@@ -619,6 +641,8 @@ ls -la /opt/hytale-server/.console_pipe
 
 ## Security
 
+### Zugriffssicherheit
+
 1. **Passwort sofort aendern!** Der Standard `change-me` ist unsicher.
 2. **HTTPS empfohlen**: Reverse-Proxy (nginx/caddy) mit TLS vorschalten.
 3. **Firewall**: Port 8088 nur fuer vertrauenswuerdige IPs freigeben:
@@ -628,6 +652,31 @@ ls -la /opt/hytale-server/.console_pipe
    ```
 4. **User-Isolation**: Dashboard laeuft als eigener User (`hytale-web`), nicht als root oder `hytale`.
 5. **Minimale Sudo-Rechte**: Nur die benoetigten systemctl-Befehle und das Update-Script.
+
+### Konsolensicherheit
+
+Das Dashboard implementiert mehrschichtige Sicherheitsmassnahmen zum Schutz des Host-Systems vor schaedlichen Konsolenbefehlen:
+
+**Command-Injection-Schutz:**
+- Blockierung von Shell-Metazeichen (`;`, `&`, `|`, `` ` ``, `$`, `()`, `<>`, `\`, Quotes)
+- Validierung auf Null-Bytes
+- Maximale Befehlslaenge (500 Zeichen)
+
+**Path-Traversal-Schutz:**
+- Blockierung von `../` Mustern
+- Verbot von Zugriff auf Systempfade (`/etc/`, `/proc/`, `/sys/`, `/dev/`, `/root/`, `/tmp/`, `/var/`)
+- Nur `/opt/hytale-server/` ist erlaubt
+
+**Systembefehl-Schutz:**
+- Blockierung gefaehrlicher Systembefehle (`sudo`, `su`, `chmod`, `chown`, `rm`, `mv`, `cp`, `dd`, `mkfs`, `mount`, `kill`, `systemctl`, `service`, `reboot`, `shutdown`)
+- Blockierung von Server-Management-Befehlen die nur ueber Dashboard-Funktionen erlaubt sind (`op`, `deop`, `ban`, `whitelist`, `stop`, `reload`)
+
+**Defense-in-Depth:**
+- Mehrschichtige Validierung (API-Ebene + FIFO-Ebene)
+- Befehle werden nur als Text ueber FIFO Pipe gesendet (keine Shell-Ausfuehrung)
+- Umfassende Test-Suite mit 100+ Sicherheitstests
+
+Diese Massnahmen verhindern, dass ueber die Webkonsole schaedliche Befehle ausgefuehrt werden koennen, die das Host-System beschaedigen koennten.
 
 ---
 
