@@ -18,7 +18,7 @@ Web-Dashboard zur Verwaltung eines Hytale Dedicated Servers unter Linux (Debian/
 - **Service-Status**: ActiveState, SubState, MainPID, Uptime
 - **Disk-Auslastung**: Belegung der Server-Partition mit visueller Anzeige
 - **Version**: Aktuelle und verfuegbare Server-Version, manuelles/automatisches Update
-- **Auto-Update-Check**: Stuendliche Versionpruefung mit geplantem Update bei Spielern
+- **Auto-Update-Check**: Stuendliche Versionspruefung mit geplantem Update bei Spielern
 - **Backup-Uebersicht**: Liste der vorhandenen Backups mit Groesse und Datum
 - **Logs**: Live-Tail der letzten 150 Zeilen (Auto-Polling)
 - **Server-Steuerung**: Start/Stop/Restart Buttons, Backup ausloesen

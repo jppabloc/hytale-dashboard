@@ -32,9 +32,11 @@
   }
 
   function isCommandAllowed(command) {
-    const blocked = ["op ", "deop ", "stop", "restart", "update", "whitelist", "ban", "unban"];
     const normalized = normalizeCommand(command);
-    return !blocked.some(prefix => normalized.startsWith(prefix));
+    if (!normalized) return false;
+    const [head] = normalized.split(/\s+/);
+    const blocked = new Set(["op", "deop", "stop", "restart", "update", "whitelist", "ban", "unban"]);
+    return !blocked.has(head);
   }
 
   // --- Players ---

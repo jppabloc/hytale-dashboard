@@ -40,11 +40,14 @@ UPDATE_POSTPONE_COMMAND = os.environ.get("UPDATE_POSTPONE_COMMAND", "/postponeup
 UPDATE_CHECK_FILE = SERVER_DIR / ".last_version_check"
 UPDATE_SCHEDULE_FILE = SERVER_DIR / ".update_schedule"
 UPDATE_COMMAND_CURSOR_FILE = SERVER_DIR / ".update_command_cursor"
+UPDATE_CHECK_LOCK = SERVER_DIR / ".update_check_lock"
 UPDATE_NOTICE_PREFIX = "[Dashboard]"
 CONSOLE_PIPE = SERVER_DIR / ".console_pipe"
 MODS_DIR = SERVER_DIR / "mods"
 WORLD_CONFIG_FILE = SERVER_DIR / "universe" / "worlds" / "default" / "config.json"
 SERVER_CONFIG_FILE = SERVER_DIR / "config.json"
+PLAYER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
+BLOCKED_CONSOLE_COMMANDS = {"op", "deop", "update", "restart", "ban", "unban"}
 
 # ---------------------------------------------------------------------------
 # App Setup
@@ -236,7 +239,10 @@ def read_timestamp(path: Path) -> datetime | None:
         try:
             return datetime.fromtimestamp(float(value), tz=timezone.utc)
         except ValueError:
-            return datetime.fromisoformat(value)
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                return None
     except (ValueError, OSError):
         return None
 
@@ -310,7 +316,7 @@ def send_console_command(command: str, ignore_errors: bool = False) -> None:
 def send_update_notice() -> None:
     msg = (
         f"{UPDATE_NOTICE_PREFIX} Update startet in {UPDATE_NOTICE_MINUTES} Minuten. "
-        f"Nutze {UPDATE_POSTPONE_COMMAND} um um {UPDATE_NOTICE_MINUTES} Minuten zu verschieben."
+        f"Nutze {UPDATE_POSTPONE_COMMAND} um {UPDATE_NOTICE_MINUTES} Minuten zu verschieben."
     )
     send_console_command(f"say {msg}", ignore_errors=True)
 
@@ -330,6 +336,9 @@ def clear_update_schedule() -> None:
 
 def should_run_version_check(now: datetime) -> bool:
     if UPDATE_CHECK_INTERVAL <= 0:
+        return False
+    lock_time = read_timestamp(UPDATE_CHECK_LOCK)
+    if lock_time and now - lock_time < timedelta(seconds=30):
         return False
     last_check = read_timestamp(UPDATE_CHECK_FILE)
     if not last_check:
@@ -390,9 +399,10 @@ def schedule_or_run_update() -> None:
         return
     if not online_players:
         run_cmd(["sudo", UPDATE_SCRIPT, "update"], timeout=600)
-        clear_update_schedule()
         return
     scheduled_at = now + timedelta(minutes=UPDATE_NOTICE_MINUTES)
+    if load_update_schedule():
+        return
     save_update_schedule(scheduled_at)
     send_update_notice()
 
@@ -404,16 +414,27 @@ def check_hourly_updates() -> None:
     if not should_run_version_check(now):
         schedule_or_run_update()
         return
+    write_timestamp(UPDATE_CHECK_LOCK, now)
     result = check_for_updates()
     write_timestamp(UPDATE_CHECK_FILE, now)
+    with contextlib.suppress(OSError):
+        UPDATE_CHECK_LOCK.unlink()
     if result and result.get("update_available"):
         schedule_or_run_update()
 
 
 def should_allow_console_command(command: str) -> bool:
-    lower = command.strip().lower()
-    disallowed = ("op ", "deop ", "stop", "restart", "update", "whitelist", "ban", "unban")
-    return not lower.startswith(disallowed)
+    parts = command.strip().split()
+    if not parts:
+        return False
+    head = parts[0].lower()
+    if head in BLOCKED_CONSOLE_COMMANDS:
+        return False
+    if head == "stop":
+        return False
+    if head == "whitelist":
+        return False
+    return True
 
 
 def get_ops_list() -> list[str]:
@@ -430,6 +451,8 @@ def get_ops_list() -> list[str]:
 
 
 def set_operator(name: str, enable: bool) -> None:
+    if not PLAYER_NAME_RE.match(name):
+        raise RuntimeError("Ungueltiger Spielername.")
     command = f"{'op' if enable else 'deop'} {name}"
     send_console_command(command)
 
