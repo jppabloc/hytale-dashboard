@@ -36,6 +36,8 @@ PRESERVE=(
     ".latest_version"
     ".update_after_backup"
     ".downloader"
+    "start.sh"
+    ".console_pipe"
 )
 
 json_output() {
