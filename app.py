@@ -23,7 +23,8 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 DASH_USER = os.environ.get("DASH_USER", "admin")
 DASH_PASS = os.environ.get("DASH_PASS", "changeme")
 ALLOW_CONTROL = os.environ.get("ALLOW_CONTROL", "false").lower() == "true"
-CF_API_KEY = os.environ.get("CF_API_KEY", "")  # CurseForge API Key
+# CurseForge API Key (from env, can be overridden via config file)
+_CF_API_KEY_ENV = os.environ.get("CF_API_KEY", "")
 
 SERVICE_NAME = "hytale.service"
 BACKUP_DIR = Path("/opt/hytale-server/backups")
@@ -51,6 +52,62 @@ _OLD_WORLD_CONFIG = SERVER_DIR / "universe" / "worlds" / "default" / "config.jso
 WORLD_CONFIG_FILE = _NEW_WORLD_CONFIG if _NEW_WORLD_CONFIG.exists() else _OLD_WORLD_CONFIG
 SERVER_CONFIG_FILE = SERVER_DIR / "config.json"
 PLAYER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
+
+# ---------------------------------------------------------------------------
+# Runtime Configuration (persisted settings)
+# ---------------------------------------------------------------------------
+DASHBOARD_CONFIG_FILE = SERVER_DIR / ".dashboard_config.json"
+_config_cache = None
+from threading import Lock
+_config_lock = Lock()
+
+
+def load_config() -> dict:
+    """Load runtime configuration from file."""
+    global _config_cache
+
+    default_config = {
+        "cf_api_key": _CF_API_KEY_ENV,
+    }
+
+    with _config_lock:
+        if _config_cache is not None:
+            merged = {**default_config, **_config_cache}
+            return merged
+
+        if DASHBOARD_CONFIG_FILE.exists():
+            try:
+                with open(DASHBOARD_CONFIG_FILE, "r") as f:
+                    _config_cache = json.load(f)
+                merged = {**default_config, **_config_cache}
+                return merged
+            except (json.JSONDecodeError, PermissionError, OSError):
+                pass
+
+        _config_cache = default_config
+        return default_config
+
+
+def save_config(config: dict) -> bool:
+    """Save runtime configuration to file."""
+    global _config_cache
+
+    with _config_lock:
+        try:
+            DASHBOARD_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(DASHBOARD_CONFIG_FILE, "w") as f:
+                json.dump(config, f, indent=2)
+            _config_cache = config
+            return True
+        except (PermissionError, OSError) as e:
+            print(f"[Dashboard] Failed to save config: {e}")
+            return False
+
+
+def get_cf_api_key() -> str:
+    """Get CurseForge API key (from config or env)."""
+    config = load_config()
+    return config.get("cf_api_key", "")
 
 # Security: Maximum command length to prevent buffer overflow attempts
 MAX_COMMAND_LENGTH = 500
@@ -1345,7 +1402,7 @@ async def cf_request(endpoint: str, params: dict = None) -> dict:
     import urllib.request
     import urllib.parse
 
-    if not CF_API_KEY:
+    if not get_cf_api_key():
         raise HTTPException(status_code=500, detail="CurseForge API Key nicht konfiguriert (CF_API_KEY)")
 
     url = f"{CF_API_BASE}{endpoint}"
@@ -1354,7 +1411,7 @@ async def cf_request(endpoint: str, params: dict = None) -> dict:
 
     req = urllib.request.Request(url, headers={
         "Accept": "application/json",
-        "x-api-key": CF_API_KEY,
+        "x-api-key": get_cf_api_key(),
     })
 
     def fetch():
@@ -1383,7 +1440,7 @@ async def get_hytale_game_id() -> int:
 @app.get("/api/curseforge/status")
 async def api_cf_status(user: str = Depends(verify_credentials)):
     """Check if CurseForge integration is configured and working."""
-    if not CF_API_KEY:
+    if not get_cf_api_key():
         return JSONResponse({"available": False, "reason": "API Key nicht konfiguriert"})
 
     try:
@@ -1504,7 +1561,7 @@ async def api_cf_install(mod_id: int, file_id: int, user: str = Depends(verify_c
 
         def download():
             req = urllib.request.Request(download_url, headers={
-                "x-api-key": CF_API_KEY,
+                "x-api-key": get_cf_api_key(),
             })
             with urllib.request.urlopen(req, timeout=60) as resp:
                 target_path.write_bytes(resp.read())
@@ -1516,3 +1573,66 @@ async def api_cf_install(mod_id: int, file_id: int, user: str = Depends(verify_c
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Installation fehlgeschlagen: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Settings API (Runtime Configuration)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/settings")
+async def get_settings(_: HTTPBasicCredentials = Depends(verify_credentials)):
+    """Get current runtime settings."""
+    config = load_config()
+    return {
+        "cf_api_key": "***" if config.get("cf_api_key") else "",  # Mask the key
+        "cf_api_key_set": bool(config.get("cf_api_key")),
+    }
+
+
+@app.post("/api/settings")
+async def update_settings(request: Request, _: HTTPBasicCredentials = Depends(verify_credentials)):
+    """Update runtime settings."""
+    if not ALLOW_CONTROL:
+        raise HTTPException(status_code=403, detail="Control-Aktionen deaktiviert.")
+
+    body = await request.json()
+    config = load_config()
+
+    # Update only provided values (don't overwrite with masked value)
+    if "cf_api_key" in body and body["cf_api_key"] != "***":
+        config["cf_api_key"] = body["cf_api_key"]
+
+    if save_config(config):
+        return {"ok": True, "message": "Einstellungen gespeichert / Settings saved"}
+    else:
+        raise HTTPException(status_code=500, detail="Speichern fehlgeschlagen / Save failed")
+
+
+@app.get("/api/settings/cf-status")
+async def check_cf_status(_: HTTPBasicCredentials = Depends(verify_credentials)):
+    """Check if CurseForge API key is valid."""
+    api_key = get_cf_api_key()
+
+    if not api_key:
+        return {
+            "valid": False,
+            "message": "Kein API-Key konfiguriert / No API key configured"
+        }
+
+    # Test the API key
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            "https://api.curseforge.com/v1/games",
+            headers={"Accept": "application/json", "x-api-key": api_key}
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status == 200:
+                return {"valid": True, "message": "API-Key gueltig / API key valid"}
+    except Exception as e:
+        return {
+            "valid": False,
+            "message": f"API-Key ungueltig / API key invalid: {str(e)}"
+        }
+
+    return {"valid": False, "message": "Unbekannter Fehler / Unknown error"}

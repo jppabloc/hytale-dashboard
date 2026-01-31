@@ -277,6 +277,34 @@ footer {
 }
 .console-input:focus { outline: none; border-color: var(--accent); }
 
+/* Form Groups */
+.form-group {
+  margin-bottom: 16px;
+}
+.form-group label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+.input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.btn-secondary {
+  background: var(--line);
+}
+.btn-secondary:hover {
+  background: #4a5568;
+}
+.status-online {
+  color: #48bb78;
+}
+.status-error {
+  color: #fc8181;
+}
+
 .command-ref {
   margin-top: 10px;
 }

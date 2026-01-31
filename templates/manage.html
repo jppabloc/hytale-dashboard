@@ -115,6 +115,24 @@
       </div>
     </section>
 
+    <!-- Settings -->
+    <section class="card" id="settingsCard" {% if not allow_control %}hidden{% endif %}>
+      <h2>Einstellungen / Settings</h2>
+      <div class="form-group">
+        <label for="cfApiKey">CurseForge API Key</label>
+        <div class="input-row">
+          <input type="password" id="cfApiKey" class="console-input" placeholder="API Key eingeben..." style="max-width: 350px;" />
+          <button id="cfApiKeySave" class="btn-control">Speichern</button>
+          <button id="cfApiKeyTest" class="btn-control btn-secondary">Testen</button>
+        </div>
+        <small class="muted">
+          Kostenlos erhaeltlich bei <a href="https://console.curseforge.com/" target="_blank">console.curseforge.com</a> /
+          Free at <a href="https://console.curseforge.com/" target="_blank">console.curseforge.com</a>
+        </small>
+        <div id="cfApiKeyStatus" class="muted" style="margin-top: 8px;"></div>
+      </div>
+    </section>
+
     <!-- CurseForge Browser -->
     <section class="card card-wide" id="curseforgeCard">
       <h2>CurseForge Mods</h2>

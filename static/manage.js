@@ -560,12 +560,65 @@
     }
   }
 
+  // --- Settings ---
+  async function loadSettings() {
+    const data = await api("/api/settings");
+    if (!data) return;
+    const cfApiKey = el("cfApiKey");
+    if (cfApiKey && data.cf_api_key_set) {
+      cfApiKey.value = data.cf_api_key; // Will be "***" if set
+    }
+  }
+
+  function setupSettings() {
+    const saveBtn = el("cfApiKeySave");
+    const testBtn = el("cfApiKeyTest");
+    const input = el("cfApiKey");
+    const status = el("cfApiKeyStatus");
+
+    if (saveBtn) {
+      saveBtn.addEventListener("click", async () => {
+        const value = input.value.trim();
+        if (!value || value === "***") {
+          toast("Bitte API-Key eingeben", "error");
+          return;
+        }
+        const result = await api("/api/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cf_api_key: value }),
+        });
+        if (result && result.ok) {
+          toast("API-Key gespeichert!", "success");
+          input.value = "***";
+          checkCurseForge(); // Refresh CurseForge status
+        }
+      });
+    }
+
+    if (testBtn) {
+      testBtn.addEventListener("click", async () => {
+        status.textContent = "Teste...";
+        status.className = "muted";
+        const result = await api("/api/settings/cf-status");
+        if (result) {
+          status.textContent = result.message;
+          status.className = result.valid ? "status-online" : "status-error";
+        } else {
+          status.textContent = "Test fehlgeschlagen";
+          status.className = "status-error";
+        }
+      });
+    }
+  }
+
   // --- Init ---
   async function init() {
     setupConsole();
     setupConfig();
     setupModUpload();
     setupCurseForge();
+    setupSettings();
 
     await Promise.all([
       refreshPlayers(),
@@ -576,6 +629,7 @@
       refreshPlugins(),
       refreshQuery(),
       checkCurseForge(),
+      loadSettings(),
     ]);
 
     // Poll players, console, and query
