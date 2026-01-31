@@ -1,0 +1,14 @@
+# Prometheus configuration example for Hytale Dashboard
+# Copy to prometheus.yml and adjust as needed
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: 'hytale'
+    static_configs:
+      - targets: ['dashboard:8088']  # Docker network
+        # Use 'localhost:8088' for native installation
+    metrics_path: /metrics
+    scrape_interval: 5s

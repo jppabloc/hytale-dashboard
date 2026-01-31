@@ -31,11 +31,18 @@ Web-Dashboard zur Verwaltung eines Hytale Dedicated Servers unter Linux (Debian/
 - **Mod-Verwaltung**: Mods auflisten, aktivieren/deaktivieren, loeschen, hochladen (.zip)
 - **CurseForge Integration**: Mods direkt aus CurseForge suchen und installieren
 
+### Monitoring & Performance
+- **SQLite-Datenbank**: Schnelle Datenspeicherung fuer Spieler und Metriken
+- **Background Worker**: Kontinuierliche Datensammlung (TPS, CPU, RAM)
+- **Prometheus Metrics**: `/metrics` Endpoint fuer Grafana-Integration
+- **Performance History**: 24h Verlaufsdaten fuer Graphen
+
 ### Allgemein
 - Dark-Theme UI
 - HTTP Basic Authentication
 - Responsive Design
 - Toast-Benachrichtigungen
+- API-Antwortzeiten <15ms (dank SQLite-Cache)
 
 ---
 
@@ -50,7 +57,56 @@ Web-Dashboard zur Verwaltung eines Hytale Dedicated Servers unter Linux (Debian/
 
 ---
 
-## Schnellinstallation (Empfohlen)
+## Docker Installation
+
+Das Dashboard kann auch als Docker Container betrieben werden:
+
+```bash
+# Repository klonen
+git clone https://github.com/zonfacter/hytale-dashboard.git
+cd hytale-dashboard
+
+# .env Datei erstellen
+cat > .env << EOF
+DASH_USER=admin
+DASH_PASS=dein-sicheres-passwort
+ALLOW_CONTROL=true
+CF_API_KEY=dein-curseforge-api-key
+EOF
+
+# Container starten
+docker-compose up -d
+```
+
+Das Dashboard ist dann unter `http://localhost:8088` erreichbar.
+
+### Docker Compose Services
+
+| Service | Port | Beschreibung |
+|---------|------|--------------|
+| `dashboard` | 8088 | Web-Dashboard (FastAPI) |
+| `worker` | - | Background-Worker (Metriken sammeln) |
+
+### Volumes
+
+| Volume | Beschreibung |
+|--------|--------------|
+| `./data` | SQLite Datenbank (Persistenz) |
+| `/opt/hytale-server` | Server-Verzeichnis (read-only) |
+| `/var/log/journal` | Journal-Logs (read-only) |
+
+### Mit Prometheus & Grafana
+
+Entkommentiere die optionalen Services in `docker-compose.yml` fuer vollstaendiges Monitoring:
+
+```bash
+# Alle Services inkl. Prometheus/Grafana starten
+docker-compose --profile monitoring up -d
+```
+
+---
+
+## Schnellinstallation (Native, Empfohlen)
 
 Das Installations-Script richtet alles automatisch ein:
 
@@ -409,11 +465,15 @@ Alle Einstellungen erfolgen ueber Environment-Variablen in der systemd Unit-Date
 ```
 /opt/hytale-dashboard/
 ├── app.py                      # FastAPI Backend (alle API-Endpunkte)
+├── worker.py                   # Background-Worker (Metriken sammeln)
 ├── requirements.txt            # Python-Abhaengigkeiten
 ├── hytale-dashboard.service    # systemd Unit (Dashboard)
+├── hytale-dashboard-worker.service  # systemd Unit (Worker)
 ├── hytale.service              # systemd Unit (Server, Vorlage)
 ├── hytale-update.sh            # Update-Script (Version pruefen + installieren)
 ├── start-hytale.sh             # Server-Wrapper (FIFO Pipe fuer Konsole)
+├── data/
+│   └── dashboard.db            # SQLite Datenbank (Performance, Spieler)
 ├── templates/
 │   ├── index.html              # Dashboard-Seite
 │   └── manage.html             # Verwaltungs-Seite
@@ -421,6 +481,84 @@ Alle Einstellungen erfolgen ueber Environment-Variablen in der systemd Unit-Date
     ├── app.js                  # Dashboard JS (Status, Logs, Version, Updates)
     ├── manage.js               # Verwaltung JS (Spieler, Konsole, Config, Mods)
     └── style.css               # Dark-Theme Styling
+```
+
+### Background Worker
+
+Der Worker (`worker.py`) laeuft als separater systemd-Service und sammelt kontinuierlich Daten:
+
+- **Performance-Metriken** (alle 5 Sekunden): TPS, CPU, RAM, View Radius
+- **Spieler-Events** (alle 10 Sekunden): Join/Leave aus Logs parsen
+- **Cleanup** (stuendlich): Alte Daten loeschen (24h Performance, 7 Tage Events)
+
+Die Daten werden in einer SQLite-Datenbank gespeichert, was blitzschnelle API-Antworten (<15ms) ermoeglicht.
+
+---
+
+## Prometheus / Grafana Integration
+
+Das Dashboard bietet einen Prometheus-kompatiblen Metrics-Endpoint fuer Monitoring und Grafana-Integration.
+
+### Verfuegbare Metriken
+
+| Metrik | Typ | Beschreibung |
+|--------|-----|--------------|
+| `hytale_tps` | Gauge | Aktuelle TPS (Ticks per Second) |
+| `hytale_cpu_percent` | Gauge | CPU-Auslastung in % |
+| `hytale_ram_mb` | Gauge | RAM-Verbrauch in MB |
+| `hytale_ram_percent` | Gauge | RAM-Auslastung in % |
+| `hytale_view_radius` | Gauge | Aktueller View Radius |
+| `hytale_players_online` | Gauge | Anzahl Online-Spieler |
+| `hytale_players_total` | Gauge | Anzahl bekannter Spieler |
+| `hytale_server_up` | Gauge | Server-Status (1=online, 0=offline) |
+| `hytale_disk_total_bytes` | Gauge | Gesamter Speicherplatz |
+| `hytale_disk_used_bytes` | Gauge | Belegter Speicherplatz |
+| `hytale_disk_free_bytes` | Gauge | Freier Speicherplatz |
+| `hytale_disk_used_percent` | Gauge | Speicherauslastung in % |
+| `hytale_backups_count` | Gauge | Anzahl Backups |
+| `hytale_backups_size_bytes` | Gauge | Gesamtgroesse aller Backups |
+| `hytale_backup_last_timestamp` | Gauge | Unix-Timestamp des letzten Backups |
+| `hytale_mods_count` | Gauge | Anzahl installierter Mods |
+| `hytale_mods_enabled` | Gauge | Anzahl aktivierter Mods |
+
+### Endpoints
+
+| Pfad | Auth | Beschreibung |
+|------|------|--------------|
+| `/metrics` | Nein | Prometheus Scraping (ohne Auth) |
+| `/api/metrics` | Ja | Prometheus Metrics mit Auth |
+| `/api/performance` | Ja | Aktuelle Performance-Daten (JSON) |
+| `/api/performance/history?hours=24` | Ja | Performance-Verlauf (JSON) |
+
+### Prometheus Konfiguration
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: 'hytale'
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['YOUR_SERVER_IP:8088']
+    metrics_path: /metrics
+```
+
+### Grafana Dashboard
+
+1. Prometheus als Datasource hinzufuegen
+2. Neues Dashboard erstellen
+3. Beispiel-Queries:
+   - TPS Graph: `hytale_tps`
+   - RAM Usage: `hytale_ram_mb`
+   - CPU Usage: `hytale_cpu_percent`
+   - Player Count: `hytale_players_online`
+
+### JSON Datasource (Alternative)
+
+Falls du Grafana's JSON Datasource Plugin bevorzugst:
+
+```
+URL: http://YOUR_SERVER_IP:8088/api/performance/history?hours=24
+Auth: Basic Auth (admin / dein-passwort)
 ```
 
 ---
@@ -462,7 +600,15 @@ Alle Einstellungen erfolgen ueber Environment-Variablen in der systemd Unit-Date
 | POST | `/api/mods/upload` | Mod hochladen (.zip/.jar) |
 | GET | `/api/plugins` | Plugin Store (verfuegbare Plugins) |
 | POST | `/api/plugins/{id}/install` | Plugin installieren |
-| GET | `/api/server/query` | Server-Status via Nitrado Query |
+
+### Monitoring
+
+| Methode | Pfad | Beschreibung |
+|---------|------|--------------|
+| GET | `/metrics` | Prometheus Metrics (ohne Auth) |
+| GET | `/api/metrics` | Prometheus Metrics (mit Auth) |
+| GET | `/api/performance` | Aktuelle Performance (TPS, CPU, RAM) |
+| GET | `/api/performance/history` | Performance-Verlauf (hours=1-24) |
 
 ---
 

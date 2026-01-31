@@ -1,0 +1,20 @@
+[Unit]
+Description=Hytale Dashboard Background Worker
+After=network.target hytale.service
+
+[Service]
+Type=simple
+User=hytale
+Group=hytale
+WorkingDirectory=/opt/hytale-dashboard
+ExecStart=/opt/hytale-dashboard/.venv/bin/python3 /opt/hytale-dashboard/worker.py
+Restart=always
+RestartSec=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hytale-dashboard-worker
+
+[Install]
+WantedBy=multi-user.target

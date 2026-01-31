@@ -8,8 +8,11 @@ import subprocess
 import shutil
 import contextlib
 import re
+import time
+import sqlite3
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, Request, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -30,6 +33,7 @@ SERVICE_NAME = "hytale.service"
 BACKUP_DIR = Path("/opt/hytale-server/backups")
 SERVER_DIR = Path("/opt/hytale-server")
 LOG_LINES = 150
+DB_PATH = Path(__file__).parent / "data" / "dashboard.db"
 
 UPDATE_SCRIPT = "/usr/local/sbin/hytale-update.sh"
 VERSION_FILE = SERVER_DIR / "last_version.txt"
@@ -168,6 +172,26 @@ templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 security = HTTPBasic()
 
 
+@app.on_event("startup")
+async def startup_event():
+    """Pre-warm caches in background on startup."""
+    async def warm_caches():
+        await asyncio.sleep(1)  # Let server start first
+        # Import here to avoid circular reference
+        global _players_cache, _perf_cache
+        try:
+            loop = asyncio.get_event_loop()
+            # Warm player cache in background
+            _players_cache["data"] = await loop.run_in_executor(None, _get_players_data)
+            _players_cache["ts"] = time.time()
+            # Warm performance cache
+            _perf_cache["data"] = await loop.run_in_executor(None, _get_perf_data)
+            _perf_cache["ts"] = time.time()
+        except Exception:
+            pass  # Ignore errors during warmup
+    asyncio.create_task(warm_caches())
+
+
 def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
     correct_user = secrets.compare_digest(credentials.username, DASH_USER)
     correct_pass = secrets.compare_digest(credentials.password, DASH_PASS)
@@ -183,6 +207,10 @@ def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+# Thread pool for non-blocking subprocess calls
+_executor = ThreadPoolExecutor(max_workers=4)
+
+
 def run_cmd(cmd: list[str], timeout: int = 10) -> tuple[str, int]:
     """Run a subprocess and return (stdout+stderr, returncode)."""
     try:
@@ -197,6 +225,12 @@ def run_cmd(cmd: list[str], timeout: int = 10) -> tuple[str, int]:
         return f"Command not found: {cmd[0]}", 1
     except Exception as e:
         return str(e), 1
+
+
+async def run_cmd_async(cmd: list[str], timeout: int = 10) -> tuple[str, int]:
+    """Async version of run_cmd using thread pool."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_executor, run_cmd, cmd, timeout)
 
 
 def human_size(size_bytes: float) -> str:
@@ -233,6 +267,238 @@ def get_logs() -> list[str]:
     if rc != 0:
         return [f"[Error fetching logs: {output}]"]
     return output.splitlines()
+
+
+def get_db_connection():
+    """Get a SQLite connection with proper settings."""
+    if not DB_PATH.exists():
+        return None
+    conn = sqlite3.connect(DB_PATH, timeout=5)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def get_performance_from_db() -> dict:
+    """Get latest performance metrics from SQLite database."""
+    result = {
+        "tps": None,
+        "cpu_percent": None,
+        "ram_mb": None,
+        "ram_percent": None,
+        "view_radius": None,
+        "mode": "sqlite"
+    }
+
+    conn = get_db_connection()
+    if not conn:
+        # Fallback to log parsing if DB not available
+        return get_tps_from_logs_fallback()
+
+    try:
+        c = conn.cursor()
+        c.execute("""
+            SELECT tps, cpu_percent, ram_mb, ram_percent, view_radius
+            FROM performance
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """)
+        row = c.fetchone()
+        if row:
+            result["tps"] = row["tps"]
+            result["cpu_percent"] = row["cpu_percent"]
+            result["ram_mb"] = row["ram_mb"]
+            result["ram_percent"] = row["ram_percent"]
+            result["view_radius"] = row["view_radius"]
+    except Exception as e:
+        print(f"DB error: {e}")
+    finally:
+        conn.close()
+
+    return result
+
+
+def get_players_from_db() -> dict:
+    """Get player list from SQLite database."""
+    conn = get_db_connection()
+    if not conn:
+        # Fallback to log parsing if DB not available
+        return get_players_from_logs_fallback()
+
+    try:
+        c = conn.cursor()
+        c.execute("""
+            SELECT uuid, name, online, last_login, last_logout, world
+            FROM players
+            ORDER BY last_login DESC
+        """)
+        rows = c.fetchall()
+        players = []
+        for row in rows:
+            players.append({
+                "uuid": row["uuid"],
+                "name": row["name"],
+                "online": bool(row["online"]),
+                "last_login": row["last_login"],
+                "last_logout": row["last_logout"],
+                "world": row["world"],
+                "position": None
+            })
+        return {"players": players, "ops": get_ops_list()}
+    except Exception as e:
+        print(f"DB error: {e}")
+        return {"players": [], "error": str(e)}
+    finally:
+        conn.close()
+
+
+def get_performance_history(hours: int = 1) -> list:
+    """Get performance history for graphs."""
+    conn = get_db_connection()
+    if not conn:
+        return []
+
+    try:
+        c = conn.cursor()
+        c.execute("""
+            SELECT timestamp, tps, cpu_percent, ram_mb, players_online
+            FROM performance
+            WHERE timestamp > datetime('now', ? || ' hours')
+            ORDER BY timestamp ASC
+        """, (f"-{hours}",))
+        return [dict(row) for row in c.fetchall()]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+def get_view_radius_from_logs() -> int | None:
+    """Get view radius from logs (quick check)."""
+    cmd = ["journalctl", "-u", "hytale", "-n100", "--no-pager", "-q"]
+    output, rc = run_cmd(cmd, timeout=5)
+    if rc != 0:
+        return None
+
+    vr_re = re.compile(r"(?:Initial view radius is|View radius.*?to) (\d+)")
+    for line in reversed(output.splitlines()):
+        match = vr_re.search(line)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def get_tps_from_logs_fallback() -> dict:
+    """Fallback: Parse TPS from logs if DB not available."""
+    cmd = ["journalctl", "-u", "hytale", "-n500", "--no-pager", "-q"]
+    output, rc = run_cmd(cmd, timeout=10)
+    if rc != 0:
+        return {"tps": None, "view_radius": None}
+
+    tps = None
+    view_radius = None
+    tps_re = re.compile(r"Setting TPS of world \w+ to (\d+)")
+    vr_re = re.compile(r"(?:Initial view radius is|View radius.*?to) (\d+)")
+
+    for line in reversed(output.splitlines()):
+        if tps is None:
+            match = tps_re.search(line)
+            if match:
+                tps = int(match.group(1))
+        if view_radius is None:
+            match = vr_re.search(line)
+            if match:
+                view_radius = int(match.group(1))
+        if tps is not None and view_radius is not None:
+            break
+
+    return {"tps": tps, "view_radius": view_radius}
+
+
+def get_players_from_logs_fallback() -> dict:
+    """Fallback: Get players from logs if DB not available."""
+    output, rc = run_cmd(
+        ["journalctl", "-u", "hytale", "--no-pager", "-o", "short-iso", "--since", "3 days ago"],
+        timeout=30
+    )
+    if rc != 0:
+        return {"players": [], "error": output}
+    return {"players": parse_players(output), "ops": get_ops_list()}
+
+
+def get_resource_usage() -> dict:
+    """Get CPU and RAM usage for the server process (Docker or native)."""
+    result = {"cpu_percent": None, "ram_mb": None, "ram_percent": None, "mode": "unknown"}
+
+    # Check for Docker container first
+    docker_container = os.getenv("HYTALE_DOCKER_CONTAINER", "")
+    if docker_container:
+        # Docker mode: use docker stats
+        cmd = ["docker", "stats", "--no-stream", "--format",
+               "{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}", docker_container]
+        output, rc = run_cmd(cmd, timeout=5)
+        if rc == 0 and output.strip():
+            try:
+                parts = output.strip().split("\t")
+                cpu_str = parts[0].replace("%", "").strip()
+                mem_usage = parts[1].split("/")[0].strip()  # e.g., "1.5GiB"
+                mem_pct = parts[2].replace("%", "").strip()
+
+                result["cpu_percent"] = float(cpu_str)
+                result["ram_percent"] = float(mem_pct)
+                result["mode"] = "docker"
+
+                # Parse memory (e.g., "1.5GiB" or "512MiB")
+                if "GiB" in mem_usage:
+                    result["ram_mb"] = float(mem_usage.replace("GiB", "")) * 1024
+                elif "MiB" in mem_usage:
+                    result["ram_mb"] = float(mem_usage.replace("MiB", ""))
+                elif "GB" in mem_usage:
+                    result["ram_mb"] = float(mem_usage.replace("GB", "")) * 1024
+                elif "MB" in mem_usage:
+                    result["ram_mb"] = float(mem_usage.replace("MB", ""))
+            except (ValueError, IndexError):
+                pass
+        return result
+
+    # Native mode: find Java process via systemd
+    # First get wrapper PID from systemd
+    cmd = ["systemctl", "show", SERVICE_NAME, "--property=MainPID", "--value"]
+    output, rc = run_cmd(cmd, timeout=3)
+    if rc != 0 or not output.strip():
+        return result
+
+    wrapper_pid = output.strip()
+    if wrapper_pid == "0":
+        return result
+
+    # Find Java child process (HytaleServer.jar)
+    cmd = ["pgrep", "-P", wrapper_pid, "java"]
+    output, rc = run_cmd(cmd, timeout=3)
+    java_pid = output.strip().split()[0] if rc == 0 and output.strip() else None
+
+    # Fallback: search for HytaleServer.jar directly
+    if not java_pid:
+        cmd = ["pgrep", "-f", "HytaleServer.jar"]
+        output, rc = run_cmd(cmd, timeout=3)
+        java_pid = output.strip().split()[0] if rc == 0 and output.strip() else None
+
+    if not java_pid:
+        return result
+
+    # Get CPU%, MEM%, RSS from ps
+    cmd = ["ps", "-p", java_pid, "-o", "%cpu,%mem,rss", "--no-headers"]
+    output, rc = run_cmd(cmd, timeout=3)
+    if rc == 0 and output.strip():
+        try:
+            parts = output.strip().split()
+            result["cpu_percent"] = float(parts[0])
+            result["ram_percent"] = float(parts[1])
+            result["ram_mb"] = int(parts[2]) / 1024  # RSS is in KB
+            result["mode"] = "native"
+        except (ValueError, IndexError):
+            pass
+
+    return result
 
 
 def get_backups() -> dict:
@@ -391,9 +657,10 @@ def parse_players(output: str) -> list[dict]:
 
 
 def get_player_entries() -> tuple[list[dict], str | None]:
+    # Use time-based filter (last 3 days) for player history - balance of coverage vs speed
     output, rc = run_cmd(
-        ["journalctl", "-u", "hytale", "--no-pager", "-o", "short-iso"],
-        timeout=15
+        ["journalctl", "-u", "hytale", "--no-pager", "-o", "short-iso", "--since", "3 days ago"],
+        timeout=30
     )
     if rc != 0:
         return [], output
@@ -624,7 +891,8 @@ def get_ops_list() -> list[str]:
 def set_operator(name: str, enable: bool) -> None:
     if not PLAYER_NAME_RE.match(name):
         raise RuntimeError("Ungueltiger Spielername.")
-    command = f"{'op' if enable else 'deop'} {name}"
+    # Hytale uses /op add <name> and /op remove <name> (not just op <name>)
+    command = f"/op {'add' if enable else 'remove'} {name}"
     send_console_command(command)
 
 
@@ -682,22 +950,194 @@ async def manage(request: Request, user: str = Depends(verify_credentials)):
     })
 
 
-@app.get("/api/status")
-async def api_status(user: str = Depends(verify_credentials)):
+def _get_status_data() -> dict:
+    """Sync function to gather all status data."""
     check_auto_update()
     check_hourly_updates()
-    return JSONResponse({
+    return {
         "service": get_service_status(),
         "backups": get_backups(),
         "disk": get_disk_usage(),
         "version": get_version_info(),
         "allow_control": ALLOW_CONTROL,
-    })
+    }
+
+
+@app.get("/api/status")
+async def api_status(user: str = Depends(verify_credentials)):
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(_executor, _get_status_data)
+    return JSONResponse(data)
+
+
+# Cache for performance data (updated every 5 seconds max)
+_perf_cache: dict = {"data": None, "ts": 0}
+
+
+def _get_perf_data() -> dict:
+    """Sync function to gather performance data from SQLite or fallback."""
+    return get_performance_from_db()
+
+
+@app.get("/api/performance")
+async def api_performance(user: str = Depends(verify_credentials)):
+    """Lightweight endpoint for performance data from SQLite."""
+    # SQLite reads are fast, minimal caching needed
+    now = time.time()
+    if _perf_cache["data"] is None or now - _perf_cache["ts"] > 2:
+        loop = asyncio.get_event_loop()
+        _perf_cache["data"] = await loop.run_in_executor(_executor, _get_perf_data)
+        _perf_cache["ts"] = now
+    return JSONResponse(_perf_cache["data"])
+
+
+@app.get("/api/performance/history")
+async def api_performance_history(user: str = Depends(verify_credentials), hours: int = 1):
+    """Get performance history for graphs."""
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(_executor, get_performance_history, hours)
+    return JSONResponse({"history": data})
+
+
+def get_metrics_data() -> str:
+    """Generate Prometheus-compatible metrics."""
+    lines = []
+
+    # Performance metrics
+    lines.append("# HELP hytale_tps Current server TPS (ticks per second)")
+    lines.append("# TYPE hytale_tps gauge")
+    lines.append("# HELP hytale_cpu_percent Server CPU usage percentage")
+    lines.append("# TYPE hytale_cpu_percent gauge")
+    lines.append("# HELP hytale_ram_mb Server RAM usage in MB")
+    lines.append("# TYPE hytale_ram_mb gauge")
+    lines.append("# HELP hytale_ram_percent Server RAM usage percentage")
+    lines.append("# TYPE hytale_ram_percent gauge")
+    lines.append("# HELP hytale_view_radius Current view radius")
+    lines.append("# TYPE hytale_view_radius gauge")
+
+    # Player metrics
+    lines.append("# HELP hytale_players_online Number of online players")
+    lines.append("# TYPE hytale_players_online gauge")
+    lines.append("# HELP hytale_players_total Total known players")
+    lines.append("# TYPE hytale_players_total gauge")
+
+    # Server status
+    lines.append("# HELP hytale_server_up Server running status (1=up, 0=down)")
+    lines.append("# TYPE hytale_server_up gauge")
+
+    # Disk metrics
+    lines.append("# HELP hytale_disk_total_bytes Total disk space in bytes")
+    lines.append("# TYPE hytale_disk_total_bytes gauge")
+    lines.append("# HELP hytale_disk_used_bytes Used disk space in bytes")
+    lines.append("# TYPE hytale_disk_used_bytes gauge")
+    lines.append("# HELP hytale_disk_free_bytes Free disk space in bytes")
+    lines.append("# TYPE hytale_disk_free_bytes gauge")
+    lines.append("# HELP hytale_disk_used_percent Disk usage percentage")
+    lines.append("# TYPE hytale_disk_used_percent gauge")
+
+    # Backup metrics
+    lines.append("# HELP hytale_backups_count Total number of backups")
+    lines.append("# TYPE hytale_backups_count gauge")
+    lines.append("# HELP hytale_backups_size_bytes Total size of all backups in bytes")
+    lines.append("# TYPE hytale_backups_size_bytes gauge")
+    lines.append("# HELP hytale_backup_last_timestamp Unix timestamp of last backup")
+    lines.append("# TYPE hytale_backup_last_timestamp gauge")
+
+    # Mod metrics
+    lines.append("# HELP hytale_mods_count Number of installed mods")
+    lines.append("# TYPE hytale_mods_count gauge")
+    lines.append("# HELP hytale_mods_enabled Number of enabled mods")
+    lines.append("# TYPE hytale_mods_enabled gauge")
+
+    # Get performance data
+    perf = get_performance_from_db()
+    if perf.get("tps") is not None:
+        lines.append(f'hytale_tps {perf["tps"]}')
+    if perf.get("cpu_percent") is not None:
+        lines.append(f'hytale_cpu_percent {perf["cpu_percent"]}')
+    if perf.get("ram_mb") is not None:
+        lines.append(f'hytale_ram_mb {perf["ram_mb"]:.2f}')
+    if perf.get("ram_percent") is not None:
+        lines.append(f'hytale_ram_percent {perf["ram_percent"]}')
+    if perf.get("view_radius") is not None:
+        lines.append(f'hytale_view_radius {perf["view_radius"]}')
+
+    # Get player data
+    players_data = get_players_from_db()
+    players = players_data.get("players", [])
+    online_count = sum(1 for p in players if p.get("online"))
+    lines.append(f'hytale_players_online {online_count}')
+    lines.append(f'hytale_players_total {len(players)}')
+
+    # Server status
+    status = get_service_status()
+    server_up = 1 if status.get("ActiveState") == "active" else 0
+    lines.append(f'hytale_server_up {server_up}')
+
+    # Disk usage
+    try:
+        disk = shutil.disk_usage(SERVER_DIR)
+        lines.append(f'hytale_disk_total_bytes {disk.total}')
+        lines.append(f'hytale_disk_used_bytes {disk.used}')
+        lines.append(f'hytale_disk_free_bytes {disk.free}')
+        lines.append(f'hytale_disk_used_percent {(disk.used / disk.total) * 100:.1f}')
+    except Exception:
+        pass
+
+    # Backup stats
+    try:
+        backups = get_backups()
+        lines.append(f'hytale_backups_count {backups.get("count", 0)}')
+        total_size = sum(f.get("size_bytes", 0) for f in backups.get("files", []))
+        lines.append(f'hytale_backups_size_bytes {total_size}')
+        # Parse last backup timestamp
+        last_backup = backups.get("last_backup", "")
+        if last_backup and last_backup != "n/a":
+            try:
+                from datetime import datetime
+                dt = datetime.strptime(last_backup, "%Y-%m-%d %H:%M:%S UTC")
+                lines.append(f'hytale_backup_last_timestamp {int(dt.timestamp())}')
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Mod stats
+    try:
+        if MODS_DIR.exists():
+            mods = [d for d in MODS_DIR.iterdir() if d.is_dir()]
+            enabled = sum(1 for d in mods if not d.name.endswith(".disabled"))
+            lines.append(f'hytale_mods_count {len(mods)}')
+            lines.append(f'hytale_mods_enabled {enabled}')
+    except Exception:
+        pass
+
+    return "\n".join(lines) + "\n"
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus-compatible metrics endpoint (no auth for scraping)."""
+    from fastapi.responses import PlainTextResponse
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(_executor, get_metrics_data)
+    return PlainTextResponse(data, media_type="text/plain; charset=utf-8")
+
+
+@app.get("/api/metrics")
+async def api_metrics(user: str = Depends(verify_credentials)):
+    """Prometheus metrics with authentication."""
+    from fastapi.responses import PlainTextResponse
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(_executor, get_metrics_data)
+    return PlainTextResponse(data, media_type="text/plain; charset=utf-8")
 
 
 @app.get("/api/logs")
 async def api_logs(user: str = Depends(verify_credentials)):
-    return JSONResponse({"lines": get_logs()})
+    loop = asyncio.get_event_loop()
+    lines = await loop.run_in_executor(_executor, get_logs)
+    return JSONResponse({"lines": lines})
 
 
 # ---------------------------------------------------------------------------
@@ -914,13 +1354,26 @@ async def api_update_auto(user: str = Depends(verify_credentials)):
 # ---------------------------------------------------------------------------
 # Management Endpoints
 # ---------------------------------------------------------------------------
+
+# Cache for player data
+_players_cache: dict = {"data": None, "ts": 0}
+
+
+def _get_players_data() -> dict:
+    """Sync function to get players data from SQLite."""
+    return get_players_from_db()
+
+
 @app.get("/api/players")
 async def api_players(user: str = Depends(verify_credentials)):
-    """Parse journalctl for player join/leave events."""
-    players, error = get_player_entries()
-    if error:
-        return JSONResponse({"players": [], "error": error})
-    return JSONResponse({"players": players, "ops": get_ops_list()})
+    """Get player list from SQLite database."""
+    now = time.time()
+    # SQLite reads are fast, 5s cache is sufficient
+    if _players_cache["data"] is None or now - _players_cache["ts"] > 5:
+        loop = asyncio.get_event_loop()
+        _players_cache["data"] = await loop.run_in_executor(_executor, _get_players_data)
+        _players_cache["ts"] = now
+    return JSONResponse(_players_cache["data"])
 
 
 @app.post("/api/players/op")
@@ -965,14 +1418,20 @@ async def api_console_send(request: Request, user: str = Depends(verify_credenti
     return {"ok": True, "command": command}
 
 
-@app.get("/api/console/output")
-async def api_console_output(user: str = Depends(verify_credentials), since: str = ""):
-    """Return recent log lines from journalctl."""
+def _get_console_output(since: str = "") -> list:
+    """Sync function to get console output."""
     cmd = ["journalctl", "-u", "hytale", "-n50", "--no-pager"]
     if since:
         cmd.extend(["--since", since])
     output, rc = run_cmd(cmd, timeout=10)
-    lines = output.splitlines() if rc == 0 else [f"[Fehler: {output}]"]
+    return output.splitlines() if rc == 0 else [f"[Fehler: {output}]"]
+
+
+@app.get("/api/console/output")
+async def api_console_output(user: str = Depends(verify_credentials), since: str = ""):
+    """Return recent log lines from journalctl."""
+    loop = asyncio.get_event_loop()
+    lines = await loop.run_in_executor(_executor, _get_console_output, since)
     return JSONResponse({"lines": lines})
 
 
@@ -1351,6 +1810,7 @@ async def api_server_query(user: str = Depends(verify_credentials)):
 
     try:
         import urllib.request
+        import urllib.error
         import ssl
 
         # Skip SSL verification for self-signed cert
@@ -1362,11 +1822,27 @@ async def api_server_query(user: str = Depends(verify_credentials)):
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
 
         def fetch():
-            with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
+            # Use a custom redirect handler to detect auth redirects
+            class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    if "/login" in newurl:
+                        raise urllib.error.HTTPError(req.full_url, 401, "WebServer requires login", headers, fp)
+                    return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+            opener = urllib.request.build_opener(NoRedirectHandler, urllib.request.HTTPSHandler(context=ctx))
+            with opener.open(req, timeout=5) as resp:
                 return json.loads(resp.read().decode())
 
         data = await asyncio.to_thread(fetch)
         return JSONResponse({"available": True, "data": data})
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            return JSONResponse({"available": False, "reason": "WebServer Login erforderlich. Erstelle ein Spieler-Passwort im Spiel mit /webserver password <passwort>"})
+        return JSONResponse({"available": False, "reason": str(e)})
+    except urllib.error.URLError as e:
+        if "Connection refused" in str(e):
+            return JSONResponse({"available": False, "reason": "WebServer nicht erreichbar (Server läuft?)"})
+        return JSONResponse({"available": False, "reason": str(e)})
     except Exception as e:
         return JSONResponse({"available": False, "reason": str(e)})
 

@@ -39,6 +39,9 @@
     return !blocked.has(head);
   }
 
+  // Shared state for performance widget
+  let cachedOnlineCount = 0;
+
   // --- Players ---
   async function refreshPlayers() {
     const data = await api("/api/players");
@@ -47,6 +50,12 @@
     const players = data.players || [];
     const ops = new Set((data.ops || []).map(p => String(p).toLowerCase()));
     const allowControl = document.body.dataset.allowControl === "true";
+
+    // Update cached online count for performance widget
+    cachedOnlineCount = players.filter(p => p.online).length;
+    const playerCountEl = el("queryPlayers");
+    if (playerCountEl) playerCountEl.textContent = cachedOnlineCount;
+
     if (players.length === 0) {
       const colspan = allowControl ? 6 : 5;
       tbody.innerHTML = `<tr><td colspan="${colspan}" class="muted">Keine Spieler gefunden</td></tr>`;
@@ -280,34 +289,79 @@
     });
   }
 
-  // --- Server Query (Nitrado) ---
+  // --- Server Performance ---
   async function refreshQuery() {
     const statusDiv = el("queryStatus");
     const dataDiv = el("queryData");
     if (!statusDiv || !dataDiv) return;
 
-    const data = await api("/api/server/query");
-    if (!data) return;
+    // Use lightweight performance endpoint (cached server-side)
+    const perf = await api("/api/performance");
+    if (!perf) return;
 
-    if (!data.available) {
-      statusDiv.textContent = data.reason || "Nicht verfuegbar";
-      statusDiv.hidden = false;
-      dataDiv.hidden = true;
-      return;
-    }
+    const tps = perf.tps;
+    const viewRadius = perf.view_radius;
+    const cpuPercent = perf.cpu_percent;
+    const ramMb = perf.ram_mb;
 
     statusDiv.hidden = true;
     dataDiv.hidden = false;
 
-    // Parse Nitrado Query API response format:
-    // { Server: { MaxPlayers, Name, Version }, Universe: { CurrentPlayers }, Players: [] }
-    const q = data.data || {};
-    const currentPlayers = q.Universe?.CurrentPlayers ?? q.Players?.length ?? "-";
-    const maxPlayers = q.Server?.MaxPlayers ?? "-";
-    // TPS is not available in the Nitrado Query API
-    el("queryPlayers").textContent = currentPlayers;
-    el("queryMaxPlayers").textContent = maxPlayers;
-    el("queryTps").textContent = "-";
+    // Display TPS with color coding
+    const tpsEl = el("queryTps");
+    if (tps !== null && tps !== undefined) {
+      tpsEl.textContent = tps;
+      if (tps >= 18) {
+        tpsEl.style.color = "#2ecc71"; // green
+      } else if (tps >= 10) {
+        tpsEl.style.color = "#f39c12"; // orange
+      } else {
+        tpsEl.style.color = "#e74c3c"; // red
+      }
+    } else {
+      tpsEl.textContent = "-";
+      tpsEl.style.color = "";
+    }
+
+    // Display CPU with color coding
+    const cpuEl = el("queryCpu");
+    if (cpuEl) {
+      if (cpuPercent !== null && cpuPercent !== undefined) {
+        cpuEl.textContent = cpuPercent.toFixed(1) + "%";
+        if (cpuPercent < 50) {
+          cpuEl.style.color = "#2ecc71"; // green
+        } else if (cpuPercent < 80) {
+          cpuEl.style.color = "#f39c12"; // orange
+        } else {
+          cpuEl.style.color = "#e74c3c"; // red
+        }
+      } else {
+        cpuEl.textContent = "-";
+        cpuEl.style.color = "";
+      }
+    }
+
+    // Display RAM
+    const ramEl = el("queryRam");
+    if (ramEl) {
+      if (ramMb !== null && ramMb !== undefined) {
+        if (ramMb >= 1024) {
+          ramEl.textContent = (ramMb / 1024).toFixed(1) + " GB";
+        } else {
+          ramEl.textContent = Math.round(ramMb) + " MB";
+        }
+      } else {
+        ramEl.textContent = "-";
+      }
+    }
+
+    const vrEl = el("queryViewRadius");
+    if (vrEl) {
+      vrEl.textContent = viewRadius !== null && viewRadius !== undefined ? viewRadius : "-";
+    }
+
+    // Use cached player count (updated by refreshPlayers)
+    el("queryPlayers").textContent = cachedOnlineCount;
   }
 
   // --- Mod Management ---

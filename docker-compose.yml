@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  dashboard:
+    build: .
+    container_name: hytale-dashboard
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    volumes:
+      # SQLite database persistence
+      - ./data:/app/data
+      # Mount server directory for config/mods access
+      - /opt/hytale-server:/opt/hytale-server:ro
+      # Mount journal for log access (read-only)
+      - /var/log/journal:/var/log/journal:ro
+      - /run/log/journal:/run/log/journal:ro
+    environment:
+      - DASH_USER=${DASH_USER:-admin}
+      - DASH_PASS=${DASH_PASS:-change-me}
+      - ALLOW_CONTROL=${ALLOW_CONTROL:-true}
+      - CF_API_KEY=${CF_API_KEY:-}
+      # For Docker mode: specify container name to monitor
+      - HYTALE_DOCKER_CONTAINER=${HYTALE_DOCKER_CONTAINER:-}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  worker:
+    build: .
+    container_name: hytale-dashboard-worker
+    restart: unless-stopped
+    command: ["python", "worker.py"]
+    volumes:
+      # SQLite database persistence (shared with dashboard)
+      - ./data:/app/data
+      # Mount journal for log access (read-only)
+      - /var/log/journal:/var/log/journal:ro
+      - /run/log/journal:/run/log/journal:ro
+    environment:
+      - HYTALE_DOCKER_CONTAINER=${HYTALE_DOCKER_CONTAINER:-}
+    depends_on:
+      - dashboard
+
+# Optional: Prometheus and Grafana for monitoring
+#  prometheus:
+#    image: prom/prometheus:latest
+#    container_name: hytale-prometheus
+#    restart: unless-stopped
+#    ports:
+#      - "9090:9090"
+#    volumes:
+#      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+#      - prometheus_data:/prometheus
+#    command:
+#      - '--config.file=/etc/prometheus/prometheus.yml'
+#      - '--storage.tsdb.path=/prometheus'
+#
+#  grafana:
+#    image: grafana/grafana:latest
+#    container_name: hytale-grafana
+#    restart: unless-stopped
+#    ports:
+#      - "3000:3000"
+#    volumes:
+#      - grafana_data:/var/lib/grafana
+#    environment:
+#      - GF_SECURITY_ADMIN_PASSWORD=admin
+#
+#volumes:
+#  prometheus_data:
+#  grafana_data:
