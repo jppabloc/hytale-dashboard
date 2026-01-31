@@ -70,8 +70,15 @@ while true; do
     MEMORY_MIN="${HYTALE_MEMORY_MIN:-2G}"
     MEMORY_MAX="${HYTALE_MEMORY_MAX:-4G}"
 
+    # Backup settings from environment or defaults
+    BACKUP_FREQUENCY="${HYTALE_BACKUP_FREQUENCY:-30}"
+
     # Default server arguments
-    DEFAULT_ARGS="--assets ../Assets.zip --backup --backup-dir backups --backup-frequency 30"
+    if [ "$BACKUP_FREQUENCY" -gt 0 ]; then
+        DEFAULT_ARGS="--assets ../Assets.zip --backup --backup-dir backups --backup-frequency $BACKUP_FREQUENCY"
+    else
+        DEFAULT_ARGS="--assets ../Assets.zip"
+    fi
 
     echo "[Wrapper] Starting Hytale Server..."
     echo "[Wrapper] Memory: ${MEMORY_MIN} - ${MEMORY_MAX}"

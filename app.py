@@ -743,47 +743,31 @@ ALLOWED_FREQUENCIES = [0, 30, 60, 120, 360]  # 0 = deaktiviert
 
 
 def get_backup_frequency() -> int:
-    """Read current backup frequency from hytale.service (or override)."""
-    # Check override first
+    """Read current backup frequency from override.conf Environment variable."""
+    # Check override first for HYTALE_BACKUP_FREQUENCY environment variable
     try:
         if HYTALE_OVERRIDE_FILE.exists():
             content = HYTALE_OVERRIDE_FILE.read_text()
             for line in content.splitlines():
-                # Skip empty ExecStart= (systemd clear directive)
                 stripped = line.strip()
-                if stripped == "ExecStart=" or not stripped.startswith("ExecStart="):
-                    continue
-                if "--backup-frequency" in line:
-                    parts = line.split("--backup-frequency")
-                    if len(parts) > 1:
-                        val = parts[1].strip().split()[0]
-                        return int(val)
-                # ExecStart with content but no --backup flag means backup is off
-                return 0
+                if "HYTALE_BACKUP_FREQUENCY" in stripped:
+                    # Parse Environment="HYTALE_BACKUP_FREQUENCY=30"
+                    import re
+                    match = re.search(r'HYTALE_BACKUP_FREQUENCY[="](\d+)', stripped)
+                    if match:
+                        return int(match.group(1))
     except (PermissionError, ValueError):
         pass
 
-    # Fall back to main service file
-    try:
-        content = HYTALE_SERVICE_FILE.read_text()
-        for line in content.splitlines():
-            if "--backup-frequency" in line:
-                parts = line.split("--backup-frequency")
-                if len(parts) > 1:
-                    val = parts[1].strip().split()[0]
-                    return int(val)
-    except (PermissionError, ValueError):
-        pass
-
-    return 0
+    # Default value (30 minutes) if no override exists
+    return 30
 
 
-def build_exec_start(frequency: int) -> str:
-    """Build ExecStart line for hytale.service with given backup frequency."""
-    base = "/usr/bin/java -Xms2G -Xmx4G -jar Server/HytaleServer.jar --assets Assets.zip --bind 0.0.0.0:5520"
-    if frequency > 0:
-        return f"{base} --backup --backup-frequency {frequency} --backup-dir backups"
-    return base
+def build_override_content(frequency: int) -> str:
+    """Build override.conf content with backup frequency environment variable."""
+    return f"""[Service]
+Environment="HYTALE_BACKUP_FREQUENCY={frequency}"
+"""
 
 
 @app.get("/api/config")
@@ -804,11 +788,8 @@ async def api_set_backup_frequency(request: Request, user: str = Depends(verify_
     if freq is None or freq not in ALLOWED_FREQUENCIES:
         raise HTTPException(status_code=400, detail=f"Ungueltige Frequenz. Erlaubt: {ALLOWED_FREQUENCIES}")
 
-    # Build override content
-    override_content = f"""[Service]
-ExecStart=
-ExecStart={build_exec_start(freq)}
-"""
+    # Build override content (only sets Environment, not ExecStart)
+    override_content = build_override_content(freq)
 
     # Create override directory
     output, rc = run_cmd(["sudo", "/bin/mkdir", "-p", str(HYTALE_OVERRIDE_DIR)])
