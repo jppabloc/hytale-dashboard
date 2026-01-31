@@ -211,8 +211,9 @@ create_users() {
 setup_server_directories() {
     print_header "Erstelle Server-Verzeichnisse"
 
+    # Note: Universe path changed in Hytale Server 2026.01 to Server/universe/
     print_step "Erstelle Verzeichnisstruktur..."
-    mkdir -p "$HYTALE_DIR"/{backups,mods,universe/worlds/default,.downloader}
+    mkdir -p "$HYTALE_DIR"/{backups,mods,Server/universe/worlds/default,.downloader}
 
     print_step "Setze Berechtigungen..."
     chown -R "$HYTALE_USER:$HYTALE_USER" "$HYTALE_DIR"
@@ -420,10 +421,10 @@ EOF
         chmod 644 "$HYTALE_DIR/config.json"
     fi
 
-    # World config.json
-    if [ ! -f "$HYTALE_DIR/universe/worlds/default/config.json" ]; then
+    # World config.json (new path since Hytale Server 2026.01)
+    if [ ! -f "$HYTALE_DIR/Server/universe/worlds/default/config.json" ]; then
         print_step "Erstelle World config.json..."
-        cat > "$HYTALE_DIR/universe/worlds/default/config.json" << 'EOF'
+        cat > "$HYTALE_DIR/Server/universe/worlds/default/config.json" << 'EOF'
 {
   "Version": 1,
   "Name": "default",
@@ -434,8 +435,8 @@ EOF
   }
 }
 EOF
-        chown "$HYTALE_USER:$HYTALE_USER" "$HYTALE_DIR/universe/worlds/default/config.json"
-        chmod 664 "$HYTALE_DIR/universe/worlds/default/config.json"
+        chown "$HYTALE_USER:$HYTALE_USER" "$HYTALE_DIR/Server/universe/worlds/default/config.json"
+        chmod 664 "$HYTALE_DIR/Server/universe/worlds/default/config.json"
     fi
 
     print_success "Konfigurationsdateien erstellt"

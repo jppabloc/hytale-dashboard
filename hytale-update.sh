@@ -21,9 +21,12 @@ DOWNLOAD_LOG="${DOWNLOADER_DIR}/download.log"
 SERVICE_NAME="hytale.service"
 
 # Files/dirs to preserve during update
+# Note: Universe path changed in Hytale Server 2026.01 to Server/universe/
+# We preserve both for backwards compatibility
 PRESERVE=(
     "mods"
     "universe"
+    "Server/universe"
     "logs"
     "backups"
     "config.json"

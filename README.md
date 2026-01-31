@@ -153,21 +153,25 @@ Die Verzeichnisstruktur sollte so aussehen:
 ```
 /opt/hytale-server/
 ├── Server/
-│   └── HytaleServer.jar
+│   ├── HytaleServer.jar
+│   ├── auth.enc                    (OAuth Credentials)
+│   └── universe/                   (Weltdaten - NEU seit 2026.01!)
+│       └── worlds/
+│           └── default/
+│               ├── config.json
+│               └── chunks/
 ├── Assets.zip
 ├── config.json
-├── universe/
-│   └── worlds/
-│       └── default/
-│           └── config.json
 ├── mods/
 ├── backups/
-├── start.sh              (Wrapper-Script)
+├── start.sh              (Hytale's offizielles Start-Script)
 └── .downloader/
     ├── hytale-downloader-linux-amd64
     ├── game.zip
     └── .hytale-downloader-credentials.json
 ```
+
+> **Wichtig / Important:** Seit Hytale Server 2026.01 werden Weltdaten in `Server/universe/` statt `universe/` gespeichert. / Since Hytale Server 2026.01, world data is stored in `Server/universe/` instead of `universe/`.
 
 ### 4. Wrapper-Script installieren
 
@@ -360,7 +364,8 @@ sudo chmod 755 /usr/local/sbin/hytale-update.sh
 
 ```bash
 # FIFO Pipe und Config muessen vom Dashboard beschreibbar sein
-sudo chmod g+w /opt/hytale-server/universe/worlds/default/config.json
+# Hinweis: Universe-Pfad ist Server/universe/ seit Hytale Server 2026.01
+sudo chmod g+w /opt/hytale-server/Server/universe/worlds/default/config.json
 sudo chmod g+w /opt/hytale-server/mods/
 ```
 
@@ -646,7 +651,7 @@ Ablauf:
 1. Neue Version herunterladen
 2. Server stoppen
 3. Backup erstellen (`.update_backup_*`)
-4. Alte Dateien ersetzen (preserviert: mods, universe, config, logs, credentials)
+4. Alte Dateien ersetzen (preserviert: mods, Server/universe, config, logs, credentials)
 5. Server starten
 
 ### Auto-Update

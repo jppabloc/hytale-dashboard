@@ -44,7 +44,11 @@ UPDATE_CHECK_LOCK = SERVER_DIR / ".update_check_lock"
 UPDATE_NOTICE_PREFIX = "[Dashboard]"
 CONSOLE_PIPE = SERVER_DIR / ".console_pipe"
 MODS_DIR = SERVER_DIR / "mods"
-WORLD_CONFIG_FILE = SERVER_DIR / "universe" / "worlds" / "default" / "config.json"
+# Universe path changed in Hytale Server 2026.01 to Server/universe/
+# Check new location first, fall back to old location for backwards compatibility
+_NEW_WORLD_CONFIG = SERVER_DIR / "Server" / "universe" / "worlds" / "default" / "config.json"
+_OLD_WORLD_CONFIG = SERVER_DIR / "universe" / "worlds" / "default" / "config.json"
+WORLD_CONFIG_FILE = _NEW_WORLD_CONFIG if _NEW_WORLD_CONFIG.exists() else _OLD_WORLD_CONFIG
 SERVER_CONFIG_FILE = SERVER_DIR / "config.json"
 PLAYER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
 
